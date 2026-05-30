@@ -709,8 +709,31 @@
     container.querySelectorAll('.status-card').forEach(function (card) {
       card.addEventListener('click', function () {
         setFilter(card.dataset.filter);
+        if (isMobileFilterLayout()) {
+          setMobileFiltersCollapsed(true);
+        }
       });
     });
+  }
+
+  function isMobileFilterLayout() {
+    return !!(window.matchMedia && window.matchMedia('(max-width: 900px)').matches);
+  }
+
+  function setMobileFiltersCollapsed(collapsed) {
+    var badges = document.getElementById('statusBadges');
+    var btn = document.getElementById('toggleMobileFilters');
+    if (!badges || !btn) return;
+
+    badges.classList.toggle('mobile-collapsed', !!collapsed);
+    btn.setAttribute('aria-expanded', String(!collapsed));
+    btn.textContent = collapsed ? '🔎 Mostrar filtros rápidos' : '🔼 Recolher filtros rápidos';
+  }
+
+  function toggleMobileFilters() {
+    var badges = document.getElementById('statusBadges');
+    if (!badges) return;
+    setMobileFiltersCollapsed(!badges.classList.contains('mobile-collapsed'));
   }
 
   function renderTable() {
@@ -1316,24 +1339,31 @@
     return name || 'cliente';
   }
 
+  function greetingByTime() {
+    var hour = new Date().getHours();
+    if (hour >= 5 && hour < 12) return 'Bom dia';
+    if (hour >= 12 && hour < 18) return 'Boa tarde';
+    return 'Boa noite';
+  }
+
+  function monthNameFromDate(value) {
+    var iso = parseDateInput(value);
+    if (!iso) return '';
+    var monthIndex = Number(iso.split('-')[1]) - 1;
+    var months = [
+      'Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
+      'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'
+    ];
+    return months[monthIndex] || '';
+  }
+
   function buildBillingMessage(client) {
-    var name = clientDisplayName(client);
-    var produto = client.produto ? ' ' + client.produto : '';
-    var vencimento = client.vencimento ? formatDate(client.vencimento) : '';
-    var days = diffDays(client.vencimento);
-    var statusText = '';
+    var vencimento = client && client.vencimento ? formatDate(client.vencimento) : 'sem data';
+    var mes = client && client.vencimento ? monthNameFromDate(client.vencimento) : '';
+    var mesTexto = mes ? ' (' + mes + ')' : '';
 
-    if (vencimento) {
-      if (days < 0) statusText = ' está vencido desde ' + vencimento;
-      else if (days === 0) statusText = ' vence hoje (' + vencimento + ')';
-      else statusText = ' vence em ' + vencimento;
-    } else {
-      statusText = ' precisa de atenção';
-    }
-
-    return 'Olá, ' + name + '! Tudo bem?\n\n' +
-      'Passando para lembrar que seu serviço' + produto + statusText + '.\n' +
-      'Podemos regularizar a renovação?';
+    return greetingByTime() + '! Lembrete de vencimento ' + vencimento + mesTexto +
+      '.O pagamento via PIX pode ser feito no número: 11947406124 (Waldemar Jose Luiz)';
   }
 
   function markClientMessageSent(id) {
@@ -1524,6 +1554,13 @@
     applyTheme();
     ensureGoogleSheetsControls();
     renderAll();
+
+    var toggleMobileFiltersBtn = document.getElementById('toggleMobileFilters');
+    if (toggleMobileFiltersBtn) {
+      toggleMobileFiltersBtn.addEventListener('click', toggleMobileFilters);
+      setMobileFiltersCollapsed(true);
+    }
+
     loadClientsFromGoogleSheets({ silent: true });
 
     // No celular o menu começa fechado para não cobrir a lista.
@@ -1559,9 +1596,11 @@
 
     window.addEventListener('resize', function () {
       var s = document.getElementById('sidebar');
-      if (!s) return;
-      if (window.matchMedia && window.matchMedia('(max-width: 768px)').matches) {
+      if (s && window.matchMedia && window.matchMedia('(max-width: 768px)').matches) {
         s.classList.add('collapsed');
+      }
+      if (isMobileFilterLayout()) {
+        setMobileFiltersCollapsed(true);
       }
     });
 
