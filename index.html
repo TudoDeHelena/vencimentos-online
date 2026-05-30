@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Gerenciador de Clientes PWA - Cadastro, controle de vencimentos e cobranças offline." />
+  <meta name="theme-color" content="#0d9488" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="icon" href="icons/icon-192.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="icons/icon-192.svg" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+  <title>Gerenciador de Clientes</title>
+</head>
+<body>
+
+  <!-- Loading overlay -->
+  <div id="loadingOverlay" class="loading-overlay" hidden>
+    <div class="loading-spinner"></div>
+  </div>
+
+  <!-- Header -->
+  <header id="appHeader" class="header">
+    <div class="header-left">
+      <button id="toggleSidebar" class="icon-btn" aria-label="Menu">☰</button>
+      <h1>Gerenciador de Clientes</h1>
+    </div>
+    <div class="header-center">
+      <button id="sendNextOverdue" class="btn btn-accent btn-glow" title="Enviar mensagem para próximo vencido">
+        ✉ Msg Próximo Vencido
+      </button>
+    </div>
+    <div class="header-right">
+      <button id="undoBtn" class="icon-btn" title="Desfazer (Ctrl+Z)" disabled>↩</button>
+      <button id="redoBtn" class="icon-btn" title="Refazer (Ctrl+Y)" disabled>↪</button>
+      <button id="installBtn" class="btn btn-install" hidden>📲 Instalar App</button>
+      <span id="lastUpdate" class="last-update"></span>
+      <span id="sheetsStatus" class="last-update sheets-status" title="Status do Google Sheets">Sheets: aguardando</span>
+    </div>
+  </header>
+
+  <div class="app-layout">
+    <!-- Sidebar -->
+    <aside id="sidebar" class="sidebar">
+      <nav class="sidebar-nav">
+        <h3 class="sidebar-title">Filtros Rápidos</h3>
+        <button class="sidebar-btn active" data-filter="all">
+          <span class="sidebar-icon">📋</span> Todos <span id="countAll" class="sidebar-count">0</span>
+        </button>
+        <button class="sidebar-btn" data-filter="ativo">
+          <span class="sidebar-icon">✅</span> Ativos <span id="countAtivo" class="sidebar-count">0</span>
+        </button>
+        <button class="sidebar-btn" data-filter="vencendo-hoje">
+          <span class="sidebar-icon">⏰</span> Vencendo Hoje <span id="countVencendoHoje" class="sidebar-count">0</span>
+        </button>
+        <button class="sidebar-btn" data-filter="proximo-vencimento">
+          <span class="sidebar-icon">⚠️</span> Próximo Venc. <span id="countProximoVenc" class="sidebar-count">0</span>
+        </button>
+        <button class="sidebar-btn" data-filter="vencido">
+          <span class="sidebar-icon">❌</span> Vencidos <span id="countVencido" class="sidebar-count">0</span>
+        </button>
+        <button class="sidebar-btn" data-filter="cobranca-hoje">
+          <span class="sidebar-icon">💰</span> Cobrança Hoje <span id="countCobrancaHoje" class="sidebar-count">0</span>
+        </button>
+        <button class="sidebar-btn" data-filter="ver-depois">
+          <span class="sidebar-icon">⏳</span> Ver Depois <span id="countVerDepois" class="sidebar-count">0</span>
+        </button>
+        <button class="sidebar-btn" data-filter="avisado">
+          <span class="sidebar-icon">📢</span> Avisados <span id="countAvisado" class="sidebar-count">0</span>
+        </button>
+        <button class="sidebar-btn" data-filter="debito">
+          <span class="sidebar-icon">💳</span> Em Débito <span id="countDebito" class="sidebar-count">0</span>
+        </button>
+        <button class="sidebar-btn" data-filter="arquivado">
+          <span class="sidebar-icon">📦</span> Arquivados <span id="countArquivado" class="sidebar-count">0</span>
+        </button>
+        <button class="sidebar-btn" data-filter="desativado">
+          <span class="sidebar-icon">🚫</span> Desativados <span id="countDesativado" class="sidebar-count">0</span>
+        </button>
+      </nav>
+
+      <hr class="sidebar-divider" />
+
+      <div class="sidebar-actions">
+        <h3 class="sidebar-title">Ações</h3>
+        <button id="addClientBtn" class="btn btn-primary btn-block">+ Adicionar Cliente</button>
+        <button id="importBtn" class="btn btn-outline btn-block">📥 Importar JSON</button>
+        <button id="exportAllBtn" class="btn btn-outline btn-block">📤 Exportar Tudo</button>
+        <button id="syncSheetsBtn" class="btn btn-outline btn-block">🔄 Puxar Google Sheets</button>
+        <button id="pushSheetsBtn" class="btn btn-outline btn-block">☁️ Enviar p/ Sheets</button>
+        <button id="settingsBtn" class="btn btn-outline btn-block">⚙️ Configurações</button>
+      </div>
+
+      <input type="file" id="importFile" accept=".json" hidden />
+    </aside>
+
+    <!-- Main content -->
+    <main class="main-content">
+      <!-- Search & filter bar -->
+      <section class="toolbar">
+        <div class="search-wrapper">
+          <span class="search-icon">🔍</span>
+          <input type="text" id="searchInput" class="search-input" placeholder="Buscar por nome, telefone ou produto..." />
+          <button type="button" id="clearSearchBtn" class="clear-search-btn" aria-label="Limpar busca" title="Limpar busca" hidden>&times;</button>
+        </div>
+        <div class="toolbar-filters">
+          <select id="filterProduto" class="filter-select">
+            <option value="">Todos os Produtos</option>
+          </select>
+          <select id="filterVencimento" class="filter-select">
+            <option value="">Vencimento</option>
+            <option value="hoje">Hoje</option>
+            <option value="semana">Esta Semana</option>
+            <option value="mes">Este Mês</option>
+          </select>
+        </div>
+      </section>
+
+      <!-- Status badges summary -->
+      <section id="statusBadges" class="status-badges"></section>
+
+      <!-- Batch action bar (shows when items selected) -->
+      <section id="batchBar" class="batch-bar" hidden>
+        <span id="selectedCount" class="batch-info">0 selecionados</span>
+        <div class="batch-buttons">
+          <button class="btn btn-sm" data-batch="arquivar">📦 Arquivar</button>
+          <button class="btn btn-sm" data-batch="desarquivar">📂 Desarquivar</button>
+          <button class="btn btn-sm" data-batch="desativar">🚫 Desativar</button>
+          <button class="btn btn-sm" data-batch="reativar">✅ Reativar</button>
+          <button class="btn btn-sm" data-batch="marcar-avisado">📢 Marcar Avisado</button>
+          <button class="btn btn-sm" data-batch="desmarcar-avisado">🔕 Desmarcar Avisado</button>
+          <button class="btn btn-sm" data-batch="renovar">🔄 Renovar</button>
+          <button class="btn btn-sm" data-batch="definir-produto">🏷️ Definir Produto</button>
+          <button class="btn btn-sm" data-batch="definir-cobranca">📅 Def. Cobrança</button>
+          <button class="btn btn-sm" data-batch="ver-depois">⏳ Ver Depois</button>
+          <button class="btn btn-sm btn-danger" data-batch="excluir">🗑️ Excluir</button>
+          <button class="btn btn-sm btn-accent" data-batch="exportar">📤 Exportar</button>
+        </div>
+      </section>
+
+      <!-- Client table -->
+      <section class="table-section">
+        <table id="clientTable" class="client-table">
+          <thead>
+            <tr>
+              <th class="col-check"><input type="checkbox" id="selectAll" title="Selecionar todos" /></th>
+              <th>Nome</th>
+              <th>Telefone</th>
+              <th>Produto</th>
+              <th>Vencimento</th>
+              <th>Cobrança</th>
+              <th>Ver Depois</th>
+              <th>Status</th>
+              <th>Ações</th>
+            </tr>
+          </thead>
+          <tbody id="clientTableBody"></tbody>
+        </table>
+        <div id="emptyState" class="empty-state" hidden>
+          <span class="empty-icon">📭</span>
+          <p>Nenhum cliente encontrado.</p>
+          <button class="btn btn-primary" id="emptyAddBtn">Adicionar Primeiro Cliente</button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- =========== MODAIS =========== -->
+
+  <!-- Modal overlay (shared) -->
+  <div id="modalOverlay" class="modal-overlay" hidden></div>
+
+  <!-- Modal: Adicionar/Editar Cliente -->
+  <div id="clientModal" class="modal" hidden>
+    <div class="modal-content modal-md">
+      <div class="modal-header">
+        <h2 id="clientModalTitle">Adicionar Cliente</h2>
+        <button class="modal-close" data-close="clientModal">&times;</button>
+      </div>
+      <form id="clientForm" class="modal-body">
+        <input type="hidden" id="clientId" />
+        <div class="form-group">
+          <label for="clientNome">Nome *</label>
+          <input type="text" id="clientNome" name="nome" required autocomplete="off" />
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="clientTelefone">Telefone *</label>
+            <input type="tel" id="clientTelefone" name="telefone" required placeholder="(00) 00000-0000" />
+          </div>
+          <div class="form-group">
+            <label for="clientProduto">Produto/Serviço *</label>
+            <input type="text" id="clientProduto" name="produto" required list="produtosList" placeholder="Ex: UniTv" />
+            <datalist id="produtosList"></datalist>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="clientVencimento">Data de Vencimento *</label>
+            <input type="date" id="clientVencimento" name="vencimento" required />
+          </div>
+          <div class="form-group">
+            <label for="clientCobranca">Data de Cobrança</label>
+            <input type="date" id="clientCobranca" name="cobranca" />
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="clientObs">Observações</label>
+          <textarea id="clientObs" name="observacoes" rows="3"></textarea>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline" data-close="clientModal">Cancelar</button>
+          <button type="submit" class="btn btn-primary">Salvar</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Modal: Confirmar Exclusão -->
+  <div id="deleteModal" class="modal" hidden>
+    <div class="modal-content modal-sm">
+      <div class="modal-header">
+        <h2>Confirmar Exclusão</h2>
+        <button class="modal-close" data-close="deleteModal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p id="deleteMsg">Tem certeza que deseja excluir este cliente?</p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" data-close="deleteModal">Cancelar</button>
+        <button id="confirmDeleteBtn" class="btn btn-danger">Excluir</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Renovação -->
+  <div id="renewModal" class="modal" hidden>
+    <div class="modal-content modal-sm">
+      <div class="modal-header">
+        <h2>Renovar Vencimento</h2>
+        <button class="modal-close" data-close="renewModal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p>Escolha o novo vencimento:</p>
+        <div class="form-group">
+          <label for="renewDate">Nova data</label>
+          <input type="date" id="renewDate" />
+        </div>
+        <div class="form-group">
+          <label class="checkbox-label">
+            <input type="checkbox" id="renewDebit" /> Marcar como débito pendente
+          </label>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" data-close="renewModal">Cancelar</button>
+        <button id="confirmRenewBtn" class="btn btn-primary">Renovar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Histórico do Cliente -->
+  <div id="historyModal" class="modal" hidden>
+    <div class="modal-content modal-md">
+      <div class="modal-header">
+        <h2>Histórico do Cliente</h2>
+        <button class="modal-close" data-close="historyModal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <h3 id="historyClientName"></h3>
+        <ul id="historyList" class="history-list"></ul>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" data-close="historyModal">Fechar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Ver Depois -->
+  <div id="verDepoisModal" class="modal" hidden>
+    <div class="modal-content modal-sm">
+      <div class="modal-header">
+        <h2>Agendar – Ver Depois</h2>
+        <button class="modal-close" data-close="verDepoisModal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="verDepoisDate">Data para revisão</label>
+          <input type="date" id="verDepoisDate" />
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" data-close="verDepoisModal">Cancelar</button>
+        <button id="confirmVerDepoisBtn" class="btn btn-primary">Agendar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Definir Produto em Lote -->
+  <div id="batchProdutoModal" class="modal" hidden>
+    <div class="modal-content modal-sm">
+      <div class="modal-header">
+        <h2>Definir Produto</h2>
+        <button class="modal-close" data-close="batchProdutoModal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="batchProdutoInput">Novo Produto/Serviço</label>
+          <input type="text" id="batchProdutoInput" list="produtosList" placeholder="Ex: UniTv" />
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" data-close="batchProdutoModal">Cancelar</button>
+        <button id="confirmBatchProdutoBtn" class="btn btn-primary">Aplicar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Definir Cobrança em Lote -->
+  <div id="batchCobrancaModal" class="modal" hidden>
+    <div class="modal-content modal-sm">
+      <div class="modal-header">
+        <h2>Definir Data de Cobrança</h2>
+        <button class="modal-close" data-close="batchCobrancaModal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="batchCobrancaDate">Data de Cobrança</label>
+          <input type="date" id="batchCobrancaDate" />
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" data-close="batchCobrancaModal">Cancelar</button>
+        <button id="confirmBatchCobrancaBtn" class="btn btn-primary">Aplicar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Renovar em Lote -->
+  <div id="batchRenewModal" class="modal" hidden>
+    <div class="modal-content modal-sm">
+      <div class="modal-header">
+        <h2>Renovar em Lote</h2>
+        <button class="modal-close" data-close="batchRenewModal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p>Escolha o tipo de renovação:</p>
+        <div class="form-group">
+          <button id="batchRenewToday" class="btn btn-block btn-outline">Renovar para Hoje</button>
+        </div>
+        <div class="form-group">
+          <button id="batchRenewNextMonth" class="btn btn-block btn-outline">Renovar +30 dias</button>
+        </div>
+        <div class="form-group">
+          <label for="batchRenewCustomDate">Ou escolha uma data:</label>
+          <input type="date" id="batchRenewCustomDate" />
+        </div>
+        <div class="form-group">
+          <label class="checkbox-label">
+            <input type="checkbox" id="batchRenewDebit" /> Marcar como débito
+          </label>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" data-close="batchRenewModal">Cancelar</button>
+        <button id="confirmBatchRenewBtn" class="btn btn-primary">Renovar Selecionados</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Configurações -->
+  <div id="settingsModal" class="modal" hidden>
+    <div class="modal-content modal-md">
+      <div class="modal-header">
+        <h2>Configurações</h2>
+        <button class="modal-close" data-close="settingsModal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <h3>Aparência</h3>
+        <div class="form-group">
+          <label for="themePrimary">Cor Primária</label>
+          <input type="color" id="themePrimary" value="#0d9488" />
+        </div>
+        <div class="form-group">
+          <label for="themeAccent">Cor de Destaque</label>
+          <input type="color" id="themeAccent" value="#7c3aed" />
+        </div>
+        <div class="form-group">
+          <label class="checkbox-label">
+            <input type="checkbox" id="darkModeToggle" /> Modo Escuro
+          </label>
+        </div>
+        <hr />
+        <h3>Dados</h3>
+        <div class="form-group">
+          <button id="clearAllData" class="btn btn-danger btn-block">🗑️ Limpar Todos os Dados</button>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" data-close="settingsModal">Fechar</button>
+        <button id="saveSettingsBtn" class="btn btn-primary">Salvar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast container -->
+  <div id="toastContainer" class="toast-container"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

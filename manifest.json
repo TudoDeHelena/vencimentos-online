@@ -1,0 +1,20 @@
+{
+  "name": "Gerenciador de Clientes",
+  "short_name": "Clientes",
+  "description": "PWA para cadastro e controle de clientes com funcionamento offline.",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#f8fafc",
+  "theme_color": "#0d9488",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "icons/icon-192.svg",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "id": "./",
+  "scope": "./"
+}
