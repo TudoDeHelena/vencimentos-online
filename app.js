@@ -393,13 +393,33 @@
     }
   }
 
-  function loadConfig() {
-    try { return JSON.parse(localStorage.getItem(KEYS.config)) || defaultConfig(); }
-    catch (e) { return defaultConfig(); }
+  function defaultColumnVisibility() {
+    return {
+      select: true,
+      nome: true,
+      telefone: true,
+      produto: true,
+      vencimento: true,
+      cobranca: true,
+      verDepois: true,
+      status: true,
+      acoes: true
+    };
   }
 
-  function saveConfig(cfg) {
-    localStorage.setItem(KEYS.config, JSON.stringify(cfg));
+  function defaultActionVisibility() {
+    return {
+      edit: true,
+      delete: true,
+      whatsapp: true,
+      'copy-message': true,
+      renew: true,
+      notify: true,
+      debit: true,
+      schedule: true,
+      product: true,
+      history: true
+    };
   }
 
   function defaultConfig() {
@@ -407,8 +427,28 @@
       primaryColor: '#0d9488',
       accentColor: '#7c3aed',
       darkMode: false,
-      lastModified: null
+      lastModified: null,
+      visibleColumns: defaultColumnVisibility(),
+      visibleActions: defaultActionVisibility()
     };
+  }
+
+  function mergeConfig(stored) {
+    var defaults = defaultConfig();
+    stored = stored || {};
+    return Object.assign({}, defaults, stored, {
+      visibleColumns: Object.assign({}, defaults.visibleColumns, stored.visibleColumns || {}),
+      visibleActions: Object.assign({}, defaults.visibleActions, stored.visibleActions || {})
+    });
+  }
+
+  function loadConfig() {
+    try { return mergeConfig(JSON.parse(localStorage.getItem(KEYS.config)) || {}); }
+    catch (e) { return defaultConfig(); }
+  }
+
+  function saveConfig(cfg) {
+    localStorage.setItem(KEYS.config, JSON.stringify(mergeConfig(cfg)));
   }
 
   function updateLastModified() {
@@ -538,7 +578,7 @@
 
   function countStatuses(clients) {
     var counts = {
-      all: 0, ativo: 0, 'vencendo-hoje': 0, 'proximo-vencimento': 0,
+      all: 0, ativo: 0, 'vencendo-hoje': 0, 'hoje-vencidos': 0, 'proximo-vencimento': 0,
       vencido: 0, 'cobranca-hoje': 0, 'ver-depois': 0, avisado: 0, debito: 0,
       arquivado: 0, desativado: 0
     };
@@ -547,6 +587,7 @@
       counts.all++;
       var s = getStatus(c);
       if (counts[s] !== undefined) counts[s]++;
+      if (s === 'vencendo-hoje' || s === 'vencido') counts['hoje-vencidos']++;
       if (c.cobranca === today && !c.arquivado && !c.desativado) counts['cobranca-hoje']++;
       if (c.verDepois && c.verDepois <= today && !c.arquivado && !c.desativado) counts['ver-depois']++;
     });
@@ -555,7 +596,7 @@
 
   // ─── Filtro e Busca ───────────────────────────────────────
 
-  var currentFilter = 'all';
+  var currentFilter = 'vencido';
   var currentSearch = '';
   var currentProdutoFilter = '';
   var currentVencimentoFilter = '';
@@ -568,6 +609,8 @@
         var s = getStatus(c);
         if (currentFilter === 'cobranca-hoje') {
           if (c.cobranca !== today || c.arquivado || c.desativado) return false;
+        } else if (currentFilter === 'hoje-vencidos') {
+          if (s !== 'vencendo-hoje' && s !== 'vencido') return false;
         } else if (currentFilter === 'ver-depois') {
           if (!c.verDepois || c.verDepois > today || c.arquivado || c.desativado) return false;
         } else if (currentFilter === 'proximo-vencimento') {
@@ -657,6 +700,7 @@
     renderStatusBadges();
     renderTable();
     renderProdutoFilter();
+    applyVisibilitySettings();
     updateBatchBar();
     updateUndoRedoButtons();
     refreshLastModified();
@@ -668,6 +712,7 @@
     setText('countAll', counts.all);
     setText('countAtivo', counts.ativo);
     setText('countVencendoHoje', counts['vencendo-hoje']);
+    setText('countHojeVencidos', counts['hoje-vencidos']);
     setText('countProximoVenc', counts['proximo-vencimento']);
     setText('countVencido', counts.vencido);
     setText('countCobrancaHoje', counts['cobranca-hoje']);
@@ -691,6 +736,7 @@
     var badges = [
       { key: 'ativo', icon: '✅', label: 'Ativos', cls: 'badge-ativo' },
       { key: 'vencendo-hoje', icon: '⏰', label: 'Vencendo Hoje', cls: 'badge-vencendo-hoje' },
+      { key: 'hoje-vencidos', icon: '🔥', label: 'Hoje + Vencidos', cls: 'badge-vencido' },
       { key: 'proximo-vencimento', icon: '⚠️', label: 'Próx. Venc.', cls: 'badge-proximo' },
       { key: 'vencido', icon: '❌', label: 'Vencidos', cls: 'badge-vencido' },
       { key: 'avisado', icon: '📢', label: 'Avisados', cls: 'badge-avisado' },
@@ -699,7 +745,7 @@
       { key: 'ver-depois', icon: '⏳', label: 'Ver Depois', cls: 'badge-proximo' }
     ];
     container.innerHTML = badges.map(function (b) {
-      return '<div class="status-card ' + b.cls + '" data-filter="' + b.key + '" title="Filtrar por ' + b.label + '">' +
+      return '<div class="status-card ' + b.cls + (b.key === currentFilter ? ' active' : '') + '" data-filter="' + b.key + '" title="Filtrar por ' + b.label + '">' +
         '<span class="card-icon status-card-icon">' + b.icon + '</span>' +
         '<span class="card-count status-card-count">' + (counts[b.key] || 0) + '</span>' +
         '<span class="card-label status-card-label">' + b.label + '</span>' +
@@ -736,6 +782,19 @@
     setMobileFiltersCollapsed(!badges.classList.contains('mobile-collapsed'));
   }
 
+  function compareClientsByOldestDueDate(a, b) {
+    var da = parseDateInput(a && a.vencimento);
+    var db = parseDateInput(b && b.vencimento);
+
+    if (da && db && da !== db) return da.localeCompare(db);
+    if (da && !db) return -1;
+    if (!da && db) return 1;
+
+    var na = normalizeText(a && a.nome);
+    var nb = normalizeText(b && b.nome);
+    return na.localeCompare(nb);
+  }
+
   function renderTable() {
     var clients = loadClients();
     var filtered = applyFilters(clients);
@@ -750,13 +809,8 @@
     }
     if (empty) empty.hidden = true;
 
-    // Ordenar: vencidos primeiro, depois por data de vencimento
-    filtered.sort(function (a, b) {
-      var sa = getStatus(a), sb = getStatus(b);
-      var order = { 'vencido': 0, 'vencendo-hoje': 1, 'proximo-vencimento': 2, 'debito': 3, 'avisado': 4, 'ativo': 5, 'arquivado': 6, 'desativado': 7 };
-      if (order[sa] !== order[sb]) return (order[sa] || 99) - (order[sb] || 99);
-      return (a.vencimento || '').localeCompare(b.vencimento || '');
-    });
+    // Ordenar sempre da data de vencimento mais velha para a mais nova.
+    filtered.sort(compareClientsByOldestDueDate);
 
     tbody.innerHTML = filtered.map(function (c) {
       var s = getStatus(c);
@@ -786,6 +840,8 @@
         '</td>' +
         '</tr>';
     }).join('');
+
+    applyVisibilitySettings();
 
     // Bind eventos de checkbox
     tbody.querySelectorAll('.row-check').forEach(function (cb) {
@@ -845,6 +901,36 @@
     var div = document.createElement('div');
     div.textContent = str || '';
     return div.innerHTML;
+  }
+
+  function applyVisibilitySettings() {
+    var cfg = loadConfig();
+    var columns = Object.assign(defaultColumnVisibility(), cfg.visibleColumns || {});
+    var actions = Object.assign(defaultActionVisibility(), cfg.visibleActions || {});
+    var body = document.body;
+    if (!body) return;
+
+    Object.keys(defaultColumnVisibility()).forEach(function (key) {
+      body.classList.toggle('hide-col-' + key, columns[key] === false);
+    });
+
+    Object.keys(defaultActionVisibility()).forEach(function (key) {
+      body.classList.toggle('hide-action-' + key, actions[key] === false);
+    });
+  }
+
+  function loadSettingsForm() {
+    var cfg = loadConfig();
+
+    document.querySelectorAll('[data-column-toggle]').forEach(function (input) {
+      var key = input.dataset.columnToggle;
+      input.checked = cfg.visibleColumns[key] !== false;
+    });
+
+    document.querySelectorAll('[data-action-toggle]').forEach(function (input) {
+      var key = input.dataset.actionToggle;
+      input.checked = cfg.visibleActions[key] !== false;
+    });
   }
 
   // ─── Filtros ──────────────────────────────────────────────
@@ -1506,6 +1592,7 @@
     } else {
       document.body.removeAttribute('data-theme');
     }
+
     // Atualizar campos do modal de configurações
     var prim = document.getElementById('themePrimary');
     var acc = document.getElementById('themeAccent');
@@ -1513,6 +1600,9 @@
     if (prim) prim.value = cfg.primaryColor;
     if (acc) acc.value = cfg.accentColor;
     if (dark) dark.checked = cfg.darkMode;
+
+    loadSettingsForm();
+    applyVisibilitySettings();
   }
 
   function saveSettings() {
@@ -1520,8 +1610,20 @@
     cfg.primaryColor = document.getElementById('themePrimary').value;
     cfg.accentColor = document.getElementById('themeAccent').value;
     cfg.darkMode = document.getElementById('darkModeToggle').checked;
+
+    cfg.visibleColumns = Object.assign({}, cfg.visibleColumns || {});
+    document.querySelectorAll('[data-column-toggle]').forEach(function (input) {
+      cfg.visibleColumns[input.dataset.columnToggle] = input.checked;
+    });
+
+    cfg.visibleActions = Object.assign({}, cfg.visibleActions || {});
+    document.querySelectorAll('[data-action-toggle]').forEach(function (input) {
+      cfg.visibleActions[input.dataset.actionToggle] = input.checked;
+    });
+
     saveConfig(cfg);
     applyTheme();
+    renderTable();
     closeModal('settingsModal');
     showToast('Configurações salvas!', 'success');
   }
@@ -1533,7 +1635,10 @@
   window.addEventListener('beforeinstallprompt', function (e) {
     e.preventDefault();
     deferredPrompt = e;
-    document.getElementById('installBtn').hidden = false;
+    var installBtn = document.getElementById('installBtn');
+    var installMenuBtn = document.getElementById('installMenuBtn');
+    if (installBtn) installBtn.hidden = false;
+    if (installMenuBtn) installMenuBtn.disabled = false;
   });
 
   // ─── Registro do Service Worker ───────────────────────────
@@ -1554,6 +1659,7 @@
     applyTheme();
     ensureGoogleSheetsControls();
     renderAll();
+    setFilter(currentFilter);
 
     var toggleMobileFiltersBtn = document.getElementById('toggleMobileFilters');
     if (toggleMobileFiltersBtn) {
@@ -1776,15 +1882,27 @@
     document.getElementById('sendNextOverdue').addEventListener('click', sendNextOverdue);
 
     // ── Instalar PWA
-    document.getElementById('installBtn').addEventListener('click', function () {
-      if (!deferredPrompt) return;
+    function handleInstallClick() {
+      if (!deferredPrompt) {
+        showToast('Se o botão de instalação não abrir, use o menu do navegador e escolha "Instalar app" ou "Adicionar à tela inicial".', 'info');
+        return;
+      }
+
       deferredPrompt.prompt();
       deferredPrompt.userChoice.then(function (result) {
         if (result.outcome === 'accepted') showToast('App instalado!', 'success');
         deferredPrompt = null;
-        document.getElementById('installBtn').hidden = true;
+        var installBtn = document.getElementById('installBtn');
+        var installMenuBtn = document.getElementById('installMenuBtn');
+        if (installBtn) installBtn.hidden = true;
+        if (installMenuBtn) installMenuBtn.disabled = false;
       });
-    });
+    }
+
+    var headerInstallBtn = document.getElementById('installBtn');
+    var menuInstallBtn = document.getElementById('installMenuBtn');
+    if (headerInstallBtn) headerInstallBtn.addEventListener('click', handleInstallClick);
+    if (menuInstallBtn) menuInstallBtn.addEventListener('click', handleInstallClick);
 
     // ── Importar JSON
     document.getElementById('importBtn').addEventListener('click', function () {
