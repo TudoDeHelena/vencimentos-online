@@ -819,7 +819,7 @@
       var selCls = selectedIds.has(c.id) ? ' selected' : '';
       return '<tr class="' + rowCls + selCls + '" data-id="' + c.id + '">' +
         '<td class="col-check"><input type="checkbox" class="row-check" data-id="' + c.id + '" ' + checked + ' /></td>' +
-        '<td class="col-name">' + escapeHtml(c.nome) + '</td>' +
+        '<td class="col-name"><button class="name-action" data-id="' + c.id + '" title="Enviar cobrança pelo WhatsApp">' + escapeHtml(c.nome) + '</button></td>' +
         '<td class="col-phone"><button class="phone-action" data-id="' + c.id + '" title="Enviar cobrança pelo WhatsApp">' + escapeHtml(formatPhone(c.telefone)) + '</button></td>' +
         '<td class="col-product">' + escapeHtml(c.produto) + '</td>' +
         '<td class="col-due">' + formatDate(c.vencimento) + '</td>' +
@@ -848,8 +848,8 @@
       cb.addEventListener('change', function () { toggleSelect(cb.dataset.id); renderTable(); });
     });
 
-    // Bind clique no telefone para abrir cobrança no WhatsApp
-    tbody.querySelectorAll('.phone-action').forEach(function (btn) {
+    // Bind clique no nome/telefone para abrir cobrança no WhatsApp
+    tbody.querySelectorAll('.phone-action, .name-action').forEach(function (btn) {
       btn.addEventListener('click', function (e) {
         e.stopPropagation();
         sendClientMessage(btn.dataset.id);
@@ -950,9 +950,45 @@
     updateBatchBar();
   }
 
+  function isDesktopViewForced() {
+    return localStorage.getItem('pwa_force_desktop_view') === 'true';
+  }
+
+  function applyDesktopViewPreference() {
+    var forced = isDesktopViewForced();
+    if (document.body) {
+      document.body.classList.toggle('force-desktop-view', forced);
+    }
+
+    var btn = document.getElementById('desktopViewBtn');
+    if (btn) {
+      btn.textContent = forced ? '📱 Visualizar como celular' : '🖥️ Visualizar como PC';
+      btn.setAttribute('aria-pressed', String(forced));
+      btn.title = forced ? 'Voltar para visualização mobile' : 'Mostrar a página como no computador';
+    }
+  }
+
+  function toggleDesktopView() {
+    var next = !isDesktopViewForced();
+    localStorage.setItem('pwa_force_desktop_view', String(next));
+    applyDesktopViewPreference();
+
+    var sidebar = document.getElementById('sidebar');
+    if (sidebar) {
+      if (next) {
+        sidebar.classList.remove('collapsed');
+      } else if (window.matchMedia && window.matchMedia('(max-width: 768px)').matches) {
+        sidebar.classList.add('collapsed');
+      }
+    }
+
+    renderTable();
+    showToast(next ? 'Visualização de PC ativada.' : 'Visualização mobile ativada.', 'info');
+  }
+
   function closeSidebarOnMobile() {
     var sidebar = document.getElementById('sidebar');
-    if (!sidebar) return;
+    if (!sidebar || isDesktopViewForced()) return;
     if (window.matchMedia && window.matchMedia('(max-width: 768px)').matches) {
       sidebar.classList.add('collapsed');
     }
@@ -1657,6 +1693,7 @@
 
   document.addEventListener('DOMContentLoaded', function () {
     applyTheme();
+    applyDesktopViewPreference();
     ensureGoogleSheetsControls();
     renderAll();
     setFilter(currentFilter);
@@ -1671,7 +1708,7 @@
 
     // No celular o menu começa fechado para não cobrir a lista.
     var initialSidebar = document.getElementById('sidebar');
-    if (initialSidebar && window.matchMedia && window.matchMedia('(max-width: 768px)').matches) {
+    if (initialSidebar && !isDesktopViewForced() && window.matchMedia && window.matchMedia('(max-width: 768px)').matches) {
       initialSidebar.classList.add('collapsed');
     }
 
@@ -1744,11 +1781,12 @@
     }
 
     window.addEventListener('resize', function () {
+      applyDesktopViewPreference();
       var s = document.getElementById('sidebar');
-      if (s && window.matchMedia && window.matchMedia('(max-width: 768px)').matches) {
+      if (s && !isDesktopViewForced() && window.matchMedia && window.matchMedia('(max-width: 768px)').matches) {
         s.classList.add('collapsed');
       }
-      if (isMobileFilterLayout()) {
+      if (!isDesktopViewForced() && isMobileFilterLayout()) {
         setMobileFiltersCollapsed(true);
       }
     });
@@ -1946,6 +1984,9 @@
     var menuInstallBtn = document.getElementById('installMenuBtn');
     if (headerInstallBtn) headerInstallBtn.addEventListener('click', handleInstallClick);
     if (menuInstallBtn) menuInstallBtn.addEventListener('click', handleInstallClick);
+
+    var desktopViewBtn = document.getElementById('desktopViewBtn');
+    if (desktopViewBtn) desktopViewBtn.addEventListener('click', toggleDesktopView);
 
     // ── Importar JSON
     document.getElementById('importBtn').addEventListener('click', function () {
