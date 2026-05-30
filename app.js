@@ -1680,18 +1680,61 @@
       document.getElementById('sidebar').classList.toggle('collapsed');
     });
 
+    // Evita fechar/aplicar filtro quando o usuário apenas arrasta/rola o menu no celular.
+    var sidebar = document.getElementById('sidebar');
+    var sidebarPointerStartX = 0;
+    var sidebarPointerStartY = 0;
+    var sidebarPointerDragged = false;
+    var sidebarIgnoreClickUntil = 0;
+
+    function isSidebarScrollClick() {
+      return Date.now() < sidebarIgnoreClickUntil || sidebarPointerDragged;
+    }
+
+    if (sidebar) {
+      sidebar.addEventListener('pointerdown', function (event) {
+        sidebarPointerStartX = event.clientX || 0;
+        sidebarPointerStartY = event.clientY || 0;
+        sidebarPointerDragged = false;
+      }, { passive: true });
+
+      sidebar.addEventListener('pointermove', function (event) {
+        var dx = Math.abs((event.clientX || 0) - sidebarPointerStartX);
+        var dy = Math.abs((event.clientY || 0) - sidebarPointerStartY);
+        if (dx > 8 || dy > 8) {
+          sidebarPointerDragged = true;
+          sidebarIgnoreClickUntil = Date.now() + 450;
+        }
+      }, { passive: true });
+
+      sidebar.addEventListener('scroll', function () {
+        sidebarPointerDragged = true;
+        sidebarIgnoreClickUntil = Date.now() + 450;
+      }, { passive: true });
+
+      // Se um arrasto gerar um "click" ao soltar o dedo, cancela antes dos botões receberem.
+      sidebar.addEventListener('click', function (event) {
+        if (isSidebarScrollClick()) {
+          event.preventDefault();
+          event.stopPropagation();
+          sidebarPointerDragged = false;
+        }
+      }, true);
+    }
+
     // ── Filtros da sidebar
     document.querySelectorAll('.sidebar-btn').forEach(function (btn) {
       btn.addEventListener('click', function () {
+        if (isSidebarScrollClick()) return;
         setFilter(btn.dataset.filter);
         closeSidebarOnMobile();
       });
     });
 
-    // Fecha o menu no celular depois que o usuário escolhe qualquer ação dentro dele.
-    var sidebar = document.getElementById('sidebar');
+    // Fecha o menu no celular somente depois de um toque real em botão/link.
     if (sidebar) {
       sidebar.addEventListener('click', function (event) {
+        if (isSidebarScrollClick()) return;
         var chosen = event.target.closest('button, a');
         if (!chosen || chosen.id === 'toggleSidebar') return;
         if (chosen.closest('#sidebar')) {
