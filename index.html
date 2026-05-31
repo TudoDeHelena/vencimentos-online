@@ -37,7 +37,6 @@
       <button id="redoBtn" class="icon-btn" title="Refazer (Ctrl+Y)" disabled>↪</button>
       <button id="installBtn" class="btn btn-install" hidden>📲 Instalar App</button>
       <span id="lastUpdate" class="last-update"></span>
-      <span id="sheetsStatus" class="last-update sheets-status" title="Status do Google Sheets">Sheets: aguardando</span>
     </div>
   </header>
 
@@ -46,7 +45,7 @@
     <aside id="sidebar" class="sidebar">
       <nav class="sidebar-nav">
         <h3 class="sidebar-title">Filtros Rápidos</h3>
-        <button class="sidebar-btn" data-filter="all">
+        <button class="sidebar-btn active" data-filter="all">
           <span class="sidebar-icon">📋</span> Todos <span id="countAll" class="sidebar-count">0</span>
         </button>
         <button class="sidebar-btn" data-filter="ativo">
@@ -55,13 +54,10 @@
         <button class="sidebar-btn" data-filter="vencendo-hoje">
           <span class="sidebar-icon">⏰</span> Vencendo Hoje <span id="countVencendoHoje" class="sidebar-count">0</span>
         </button>
-        <button class="sidebar-btn" data-filter="hoje-vencidos">
-          <span class="sidebar-icon">🔥</span> Hoje + Vencidos <span id="countHojeVencidos" class="sidebar-count">0</span>
-        </button>
         <button class="sidebar-btn" data-filter="proximo-vencimento">
           <span class="sidebar-icon">⚠️</span> Próximo Venc. <span id="countProximoVenc" class="sidebar-count">0</span>
         </button>
-        <button class="sidebar-btn active" data-filter="vencido">
+        <button class="sidebar-btn" data-filter="vencido">
           <span class="sidebar-icon">❌</span> Vencidos <span id="countVencido" class="sidebar-count">0</span>
         </button>
         <button class="sidebar-btn" data-filter="cobranca-hoje">
@@ -91,10 +87,6 @@
         <button id="addClientBtn" class="btn btn-primary btn-block">+ Adicionar Cliente</button>
         <button id="importBtn" class="btn btn-outline btn-block">📥 Importar JSON</button>
         <button id="exportAllBtn" class="btn btn-outline btn-block">📤 Exportar Tudo</button>
-        <button id="syncSheetsBtn" class="btn btn-outline btn-block">🔄 Puxar Google Sheets</button>
-        <button id="pushSheetsBtn" class="btn btn-outline btn-block">☁️ Enviar p/ Sheets</button>
-        <button id="installMenuBtn" class="btn btn-outline btn-block">📲 Instalar App</button>
-        <button id="desktopViewBtn" class="btn btn-outline btn-block mobile-only-menu-action" type="button" aria-pressed="false">🖥️ Visualizar como PC</button>
         <button id="settingsBtn" class="btn btn-outline btn-block">⚙️ Configurações</button>
       </div>
 
@@ -124,10 +116,7 @@
       </section>
 
       <!-- Status badges summary -->
-      <button id="toggleMobileFilters" class="mobile-filter-toggle" type="button" aria-expanded="false" aria-controls="statusBadges">
-        🔎 Mostrar filtros rápidos
-      </button>
-      <section id="statusBadges" class="status-badges mobile-collapsed"></section>
+      <section id="statusBadges" class="status-badges"></section>
 
       <!-- Batch action bar (shows when items selected) -->
       <section id="batchBar" class="batch-bar" hidden>
@@ -154,14 +143,14 @@
           <thead>
             <tr>
               <th class="col-check"><input type="checkbox" id="selectAll" title="Selecionar todos" /></th>
-              <th class="col-name">Nome</th>
-              <th class="col-phone">Telefone</th>
-              <th class="col-product">Produto</th>
-              <th class="col-due">Vencimento</th>
-              <th class="col-billing">Cobrança</th>
-              <th class="col-review">Ver Depois</th>
-              <th class="col-status">Status</th>
-              <th class="col-actions">Ações</th>
+              <th>Nome</th>
+              <th>Telefone</th>
+              <th>Produto</th>
+              <th>Vencimento</th>
+              <th>Cobrança</th>
+              <th>Ver Depois</th>
+              <th>Status</th>
+              <th>Ações</th>
             </tr>
           </thead>
           <tbody id="clientTableBody"></tbody>
@@ -400,37 +389,6 @@
             <input type="checkbox" id="darkModeToggle" /> Modo Escuro
           </label>
         </div>
-        <hr />
-        <h3>Colunas da tabela</h3>
-        <p class="settings-help">Marque apenas as colunas que você quer ver na lista.</p>
-        <div class="settings-check-grid" id="columnVisibilitySettings">
-          <label class="checkbox-label"><input type="checkbox" data-column-toggle="select" checked /> Seleção</label>
-          <label class="checkbox-label"><input type="checkbox" data-column-toggle="nome" checked /> Nome</label>
-          <label class="checkbox-label"><input type="checkbox" data-column-toggle="telefone" checked /> Telefone</label>
-          <label class="checkbox-label"><input type="checkbox" data-column-toggle="produto" checked /> Produto</label>
-          <label class="checkbox-label"><input type="checkbox" data-column-toggle="vencimento" checked /> Vencimento</label>
-          <label class="checkbox-label"><input type="checkbox" data-column-toggle="cobranca" checked /> Cobrança</label>
-          <label class="checkbox-label"><input type="checkbox" data-column-toggle="verDepois" checked /> Ver Depois</label>
-          <label class="checkbox-label"><input type="checkbox" data-column-toggle="status" checked /> Status</label>
-          <label class="checkbox-label"><input type="checkbox" data-column-toggle="acoes" checked /> Ações</label>
-        </div>
-
-        <hr />
-        <h3>Ações da linha</h3>
-        <p class="settings-help">Escolha quais botões aparecem em cada cliente.</p>
-        <div class="settings-check-grid" id="actionVisibilitySettings">
-          <label class="checkbox-label"><input type="checkbox" data-action-toggle="edit" checked /> Editar</label>
-          <label class="checkbox-label"><input type="checkbox" data-action-toggle="delete" checked /> Excluir</label>
-          <label class="checkbox-label"><input type="checkbox" data-action-toggle="whatsapp" checked /> WhatsApp</label>
-          <label class="checkbox-label"><input type="checkbox" data-action-toggle="copy-message" checked /> Copiar mensagem</label>
-          <label class="checkbox-label"><input type="checkbox" data-action-toggle="renew" checked /> Renovar</label>
-          <label class="checkbox-label"><input type="checkbox" data-action-toggle="notify" checked /> Avisado</label>
-          <label class="checkbox-label"><input type="checkbox" data-action-toggle="debit" checked /> Débito</label>
-          <label class="checkbox-label"><input type="checkbox" data-action-toggle="schedule" checked /> Ver Depois</label>
-          <label class="checkbox-label"><input type="checkbox" data-action-toggle="product" checked /> Produto</label>
-          <label class="checkbox-label"><input type="checkbox" data-action-toggle="history" checked /> Histórico</label>
-        </div>
-
         <hr />
         <h3>Dados</h3>
         <div class="form-group">
