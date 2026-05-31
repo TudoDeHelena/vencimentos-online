@@ -112,314 +112,23 @@
     redoStack: 'pwa_redo'
   };
 
-  // ─── Google Sheets (Apps Script da versão antiga) ───────────
-  // Mantém o visual moderno, mas usa o mesmo backend da página antiga:
-  // GET  ?action=get_all_clients
-  // POST ?action=bulk_update_clients { clients: [...] }
-  var WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbyHKKeGamiImtqK0G-DJpJI3E_y83ZlVQq6A3kjW0LmRE9iRvNuG3VCOQmpt_s2XwLIrg/exec';
-  var sheetsLoadInProgress = false;
-  var sheetsSaveInProgress = false;
-  var sheetsSavePending = false;
-  var sheetsSaveTimer = null;
-  var sheetsLastSavedSignature = '';
-
-  function canUseGoogleSheets() {
-    return !!WEB_APP_URL && WEB_APP_URL.indexOf('script.google.com/macros/s/') !== -1;
-  }
-
-  function setSheetsStatus(message, type) {
-    var el = document.getElementById('sheetsStatus');
-    if (!el) return;
-    el.textContent = message || 'Sheets: aguardando';
-    el.className = 'last-update sheets-status' + (type ? ' ' + type : '');
-  }
-
-  async function sendRequestToBackend(action, data) {
-    if (!canUseGoogleSheets()) throw new Error('WEB_APP_URL não configurado.');
-    var url = WEB_APP_URL + '?action=' + encodeURIComponent(action);
-    var options = {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify(data || {})
-    };
-
-    if (action === 'get_all_clients') {
-      options.method = 'GET';
-      delete options.body;
-    }
-
-    var response = await fetch(url, options);
-    if (!response.ok) {
-      var errorText = await response.text();
-      throw new Error('Erro de rede ou servidor: ' + response.status + ' - ' + errorText);
-    }
-
-    var result = await response.json();
-    if (result && result.status === 'error') {
-      throw new Error(result.message || 'Erro desconhecido do backend.');
-    }
-    return result;
-  }
-
-  function boolFromSheet(value) {
-    if (typeof value === 'boolean') return value;
-    if (typeof value === 'number') return value !== 0;
-    var str = normalizeText(value);
-    return ['true', '1', 'sim', 'yes', 'y', 'x', 'ok'].indexOf(str) !== -1;
-  }
-
-  function dateToSheet(value) {
-    var iso = parseDateInput(value);
-    if (!iso) return '';
-    return formatDate(iso);
-  }
-
-  function productFromName(name) {
-    var match = String(name || '').match(/\(([^)]+)\)\s*$/);
-    return match ? match[1].trim() : '';
-  }
-
-  function sheetLogToHistory(log) {
-    if (!log) return null;
-    if (typeof log === 'string') {
-      return { data: new Date().toISOString(), acao: log };
-    }
-    return {
-      data: log.data || log.date || log.criadoEm || log.t || new Date().toISOString(),
-      acao: String(log.acao || log.action || log.mensagem || log.message || log.a || JSON.stringify(log))
-    };
-  }
-
-  function historyToSheetLogs(history) {
-    if (!Array.isArray(history)) return [];
-    return history.slice(-50).map(function (item) {
-      return {
-        t: item.data || new Date().toISOString(),
-        a: item.acao || item.action || '',
-        e: item.e || item.extra || ''
-      };
-    });
-  }
-
-  function normalizeSheetsClient(item, usedIds) {
-    if (!item || (!item.nome && !item.telefone)) return null;
-
-    var telefone = onlyDigits(item.telefone);
-    var rawId = item.id !== undefined && item.id !== null && String(item.id).trim() !== ''
-      ? String(item.id).trim()
-      : (telefone.length >= 5 ? telefone.slice(-5) : uuid());
-
-    var id = rawId;
-    while (usedIds[id]) id = uuid();
-    usedIds[id] = true;
-
-    var historico = [];
-    if (Array.isArray(item.historico)) {
-      historico = item.historico.slice();
-    } else if (Array.isArray(item.logs)) {
-      historico = item.logs.map(sheetLogToHistory).filter(Boolean);
-    }
-
-    return {
-      id: id,
-      nome: String(item.nome || '').trim(),
-      telefone: telefone,
-      produto: String(item.produto || item.Produto || item.produtoServico || item.servico || productFromName(item.nome) || '').trim(),
-      vencimento: parseDateInput(item.vencimento || item.data || item.Data),
-      observacoes: String(item.observacoes || item.observacao || item.obs || '').trim(),
-      cobranca: parseDateInput(item.cobranca || item.dataCobranca || item.DataCobranca),
-      avisado: boolFromSheet(item.avisado),
-      debito: boolFromSheet(item.debito),
-      arquivado: boolFromSheet(item.arquivado),
-      oculto: boolFromSheet(item.oculto),
-      desativado: boolFromSheet(item.desativado),
-      dola_sent: boolFromSheet(item.dola_sent),
-      clicado: boolFromSheet(item.clicado),
-      verDepois: parseDateInput(item.verDepois || item.reexibirEm),
-      historico: historico,
-      criadoEm: item.criadoEm || new Date().toISOString()
-    };
-  }
-
-  function normalizeSheetsResponse(response) {
-    var raw = Array.isArray(response) ? response :
-      (response && Array.isArray(response.clients)) ? response.clients :
-      (response && Array.isArray(response.data)) ? response.data : [];
-
-    var usedIds = {};
-    return raw.map(function (item) {
-      return normalizeSheetsClient(item, usedIds);
-    }).filter(Boolean);
-  }
-
-  function clientToSheets(client) {
-    return {
-      id: client.id,
-      data: dateToSheet(client.vencimento),
-      nome: client.nome || '',
-      telefone: onlyDigits(client.telefone),
-      avisado: !!client.avisado,
-      debito: !!client.debito,
-      Produto: client.produto || '',
-      arquivado: !!client.arquivado,
-      oculto: !!client.oculto,
-      reexibirEm: dateToSheet(client.verDepois) || null,
-      desativado: !!client.desativado,
-      dola_sent: !!client.dola_sent,
-      clicado: !!client.clicado,
-      dataCobranca: dateToSheet(client.cobranca) || null,
-      observacao: client.observacoes || '',
-      logs: historyToSheetLogs(client.historico)
-    };
-  }
-
-  function sheetsSignature(list) {
-    try {
-      return JSON.stringify((list || []).map(clientToSheets));
-    } catch (e) {
-      return String(Date.now());
-    }
-  }
-
-  async function loadClientsFromGoogleSheets(options) {
-    options = options || {};
-    if (!canUseGoogleSheets()) return loadClients();
-
-    sheetsLoadInProgress = true;
-    setSheetsStatus('Sheets: puxando...', 'syncing');
-    showLoading(true);
-
-    try {
-      var response = await sendRequestToBackend('get_all_clients');
-      var clientsFromSheets = normalizeSheetsResponse(response);
-
-      localStorage.setItem(KEYS.clients, JSON.stringify(clientsFromSheets));
-      sheetsLastSavedSignature = sheetsSignature(clientsFromSheets);
-      selectedIds.clear();
-      updateLastModified();
-      renderAll();
-
-      setSheetsStatus('Sheets: sincronizado', 'ok');
-      if (!options.silent) {
-        showToast('Dados puxados do Google Sheets: ' + clientsFromSheets.length + ' cliente(s).', 'success');
-      }
-      return clientsFromSheets;
-    } catch (error) {
-      console.error('Erro ao puxar do Google Sheets:', error);
-      setSheetsStatus('Sheets: erro ao puxar', 'error');
-      if (!options.silent) {
-        showToast('Erro ao puxar do Google Sheets: ' + error.message, 'error');
-      } else {
-        showToast('Não consegui puxar do Google Sheets. Usando dados locais.', 'warning');
-      }
-      renderAll();
-      return loadClients();
-    } finally {
-      sheetsLoadInProgress = false;
-      showLoading(false);
-    }
-  }
-
-  function queueGoogleSheetsSave(list) {
-    if (!canUseGoogleSheets() || sheetsLoadInProgress) return;
-
-    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-      setSheetsStatus('Sheets: offline', 'warning');
-      return;
-    }
-
-    clearTimeout(sheetsSaveTimer);
-    sheetsSaveTimer = setTimeout(function () {
-      syncClientsToGoogleSheets(list || loadClients());
-    }, 650);
-  }
-
-  async function syncClientsToGoogleSheets(list, options) {
-    options = options || {};
-    if (!canUseGoogleSheets() || sheetsLoadInProgress) return;
-
-    if (sheetsSaveInProgress) {
-      sheetsSavePending = true;
-      return;
-    }
-
-    var clientsToSave = list || loadClients();
-    var signature = sheetsSignature(clientsToSave);
-    if (!options.force && signature === sheetsLastSavedSignature) return;
-
-    sheetsSaveInProgress = true;
-    setSheetsStatus('Sheets: salvando...', 'syncing');
-
-    try {
-      var response = await sendRequestToBackend('bulk_update_clients', {
-        clients: clientsToSave.map(clientToSheets)
-      });
-
-      if (response && response.status && response.status !== 'success') {
-        throw new Error(response.message || 'Erro ao sincronizar com backend.');
-      }
-
-      sheetsLastSavedSignature = signature;
-      setSheetsStatus('Sheets: salvo', 'ok');
-      if (options.showToast) showToast('Dados enviados para o Google Sheets.', 'success');
-    } catch (error) {
-      console.error('Erro ao salvar no Google Sheets:', error);
-      setSheetsStatus('Sheets: erro ao salvar', 'error');
-      showToast('Salvo localmente, mas falhou no Google Sheets: ' + error.message, 'warning');
-    } finally {
-      sheetsSaveInProgress = false;
-      if (sheetsSavePending) {
-        sheetsSavePending = false;
-        queueGoogleSheetsSave(loadClients());
-      }
-    }
-  }
-
-  function ensureGoogleSheetsControls() {
-    setSheetsStatus('Sheets: aguardando', '');
-  }
-
   function loadClients() {
     try { return JSON.parse(localStorage.getItem(KEYS.clients)) || []; }
     catch (e) { return []; }
   }
 
-  function saveClients(list, options) {
-    options = options || {};
+  function saveClients(list) {
     localStorage.setItem(KEYS.clients, JSON.stringify(list));
     updateLastModified();
-    if (!options.skipGoogleSheets) {
-      queueGoogleSheetsSave(list);
-    }
   }
 
-  function defaultColumnVisibility() {
-    return {
-      select: true,
-      nome: true,
-      telefone: true,
-      produto: true,
-      vencimento: true,
-      cobranca: true,
-      verDepois: true,
-      status: true,
-      acoes: true
-    };
+  function loadConfig() {
+    try { return JSON.parse(localStorage.getItem(KEYS.config)) || defaultConfig(); }
+    catch (e) { return defaultConfig(); }
   }
 
-  function defaultActionVisibility() {
-    return {
-      edit: true,
-      delete: true,
-      whatsapp: true,
-      'copy-message': true,
-      renew: true,
-      notify: true,
-      debit: true,
-      schedule: true,
-      product: true,
-      history: true
-    };
+  function saveConfig(cfg) {
+    localStorage.setItem(KEYS.config, JSON.stringify(cfg));
   }
 
   function defaultConfig() {
@@ -427,28 +136,8 @@
       primaryColor: '#0d9488',
       accentColor: '#7c3aed',
       darkMode: false,
-      lastModified: null,
-      visibleColumns: defaultColumnVisibility(),
-      visibleActions: defaultActionVisibility()
+      lastModified: null
     };
-  }
-
-  function mergeConfig(stored) {
-    var defaults = defaultConfig();
-    stored = stored || {};
-    return Object.assign({}, defaults, stored, {
-      visibleColumns: Object.assign({}, defaults.visibleColumns, stored.visibleColumns || {}),
-      visibleActions: Object.assign({}, defaults.visibleActions, stored.visibleActions || {})
-    });
-  }
-
-  function loadConfig() {
-    try { return mergeConfig(JSON.parse(localStorage.getItem(KEYS.config)) || {}); }
-    catch (e) { return defaultConfig(); }
-  }
-
-  function saveConfig(cfg) {
-    localStorage.setItem(KEYS.config, JSON.stringify(mergeConfig(cfg)));
   }
 
   function updateLastModified() {
@@ -578,7 +267,7 @@
 
   function countStatuses(clients) {
     var counts = {
-      all: 0, ativo: 0, 'vencendo-hoje': 0, 'hoje-vencidos': 0, 'proximo-vencimento': 0,
+      all: 0, ativo: 0, 'vencendo-hoje': 0, 'proximo-vencimento': 0,
       vencido: 0, 'cobranca-hoje': 0, 'ver-depois': 0, avisado: 0, debito: 0,
       arquivado: 0, desativado: 0
     };
@@ -587,7 +276,6 @@
       counts.all++;
       var s = getStatus(c);
       if (counts[s] !== undefined) counts[s]++;
-      if (s === 'vencendo-hoje' || s === 'vencido') counts['hoje-vencidos']++;
       if (c.cobranca === today && !c.arquivado && !c.desativado) counts['cobranca-hoje']++;
       if (c.verDepois && c.verDepois <= today && !c.arquivado && !c.desativado) counts['ver-depois']++;
     });
@@ -596,7 +284,7 @@
 
   // ─── Filtro e Busca ───────────────────────────────────────
 
-  var currentFilter = 'vencido';
+  var currentFilter = 'all';
   var currentSearch = '';
   var currentProdutoFilter = '';
   var currentVencimentoFilter = '';
@@ -609,8 +297,6 @@
         var s = getStatus(c);
         if (currentFilter === 'cobranca-hoje') {
           if (c.cobranca !== today || c.arquivado || c.desativado) return false;
-        } else if (currentFilter === 'hoje-vencidos') {
-          if (s !== 'vencendo-hoje' && s !== 'vencido') return false;
         } else if (currentFilter === 'ver-depois') {
           if (!c.verDepois || c.verDepois > today || c.arquivado || c.desativado) return false;
         } else if (currentFilter === 'proximo-vencimento') {
@@ -700,7 +386,6 @@
     renderStatusBadges();
     renderTable();
     renderProdutoFilter();
-    applyVisibilitySettings();
     updateBatchBar();
     updateUndoRedoButtons();
     refreshLastModified();
@@ -712,7 +397,6 @@
     setText('countAll', counts.all);
     setText('countAtivo', counts.ativo);
     setText('countVencendoHoje', counts['vencendo-hoje']);
-    setText('countHojeVencidos', counts['hoje-vencidos']);
     setText('countProximoVenc', counts['proximo-vencimento']);
     setText('countVencido', counts.vencido);
     setText('countCobrancaHoje', counts['cobranca-hoje']);
@@ -736,7 +420,6 @@
     var badges = [
       { key: 'ativo', icon: '✅', label: 'Ativos', cls: 'badge-ativo' },
       { key: 'vencendo-hoje', icon: '⏰', label: 'Vencendo Hoje', cls: 'badge-vencendo-hoje' },
-      { key: 'hoje-vencidos', icon: '🔥', label: 'Hoje + Vencidos', cls: 'badge-vencido' },
       { key: 'proximo-vencimento', icon: '⚠️', label: 'Próx. Venc.', cls: 'badge-proximo' },
       { key: 'vencido', icon: '❌', label: 'Vencidos', cls: 'badge-vencido' },
       { key: 'avisado', icon: '📢', label: 'Avisados', cls: 'badge-avisado' },
@@ -745,7 +428,7 @@
       { key: 'ver-depois', icon: '⏳', label: 'Ver Depois', cls: 'badge-proximo' }
     ];
     container.innerHTML = badges.map(function (b) {
-      return '<div class="status-card ' + b.cls + (b.key === currentFilter ? ' active' : '') + '" data-filter="' + b.key + '" title="Filtrar por ' + b.label + '">' +
+      return '<div class="status-card ' + b.cls + '" data-filter="' + b.key + '" title="Filtrar por ' + b.label + '">' +
         '<span class="card-icon status-card-icon">' + b.icon + '</span>' +
         '<span class="card-count status-card-count">' + (counts[b.key] || 0) + '</span>' +
         '<span class="card-label status-card-label">' + b.label + '</span>' +
@@ -755,44 +438,8 @@
     container.querySelectorAll('.status-card').forEach(function (card) {
       card.addEventListener('click', function () {
         setFilter(card.dataset.filter);
-        if (isMobileFilterLayout()) {
-          setMobileFiltersCollapsed(true);
-        }
       });
     });
-  }
-
-  function isMobileFilterLayout() {
-    return !!(window.matchMedia && window.matchMedia('(max-width: 900px)').matches);
-  }
-
-  function setMobileFiltersCollapsed(collapsed) {
-    var badges = document.getElementById('statusBadges');
-    var btn = document.getElementById('toggleMobileFilters');
-    if (!badges || !btn) return;
-
-    badges.classList.toggle('mobile-collapsed', !!collapsed);
-    btn.setAttribute('aria-expanded', String(!collapsed));
-    btn.textContent = collapsed ? '🔎 Mostrar filtros rápidos' : '🔼 Recolher filtros rápidos';
-  }
-
-  function toggleMobileFilters() {
-    var badges = document.getElementById('statusBadges');
-    if (!badges) return;
-    setMobileFiltersCollapsed(!badges.classList.contains('mobile-collapsed'));
-  }
-
-  function compareClientsByOldestDueDate(a, b) {
-    var da = parseDateInput(a && a.vencimento);
-    var db = parseDateInput(b && b.vencimento);
-
-    if (da && db && da !== db) return da.localeCompare(db);
-    if (da && !db) return -1;
-    if (!da && db) return 1;
-
-    var na = normalizeText(a && a.nome);
-    var nb = normalizeText(b && b.nome);
-    return na.localeCompare(nb);
   }
 
   function renderTable() {
@@ -809,8 +456,13 @@
     }
     if (empty) empty.hidden = true;
 
-    // Ordenar sempre da data de vencimento mais velha para a mais nova.
-    filtered.sort(compareClientsByOldestDueDate);
+    // Ordenar: vencidos primeiro, depois por data de vencimento
+    filtered.sort(function (a, b) {
+      var sa = getStatus(a), sb = getStatus(b);
+      var order = { 'vencido': 0, 'vencendo-hoje': 1, 'proximo-vencimento': 2, 'debito': 3, 'avisado': 4, 'ativo': 5, 'arquivado': 6, 'desativado': 7 };
+      if (order[sa] !== order[sb]) return (order[sa] || 99) - (order[sb] || 99);
+      return (a.vencimento || '').localeCompare(b.vencimento || '');
+    });
 
     tbody.innerHTML = filtered.map(function (c) {
       var s = getStatus(c);
@@ -819,7 +471,7 @@
       var selCls = selectedIds.has(c.id) ? ' selected' : '';
       return '<tr class="' + rowCls + selCls + '" data-id="' + c.id + '">' +
         '<td class="col-check"><input type="checkbox" class="row-check" data-id="' + c.id + '" ' + checked + ' /></td>' +
-        '<td class="col-name"><button class="name-action" data-id="' + c.id + '" title="Enviar cobrança pelo WhatsApp">' + escapeHtml(c.nome) + '</button></td>' +
+        '<td class="col-name"><button type="button" class="client-name-action" data-id="' + c.id + '" title="Enviar cobrança pelo WhatsApp">' + escapeHtml(c.nome) + '</button></td>' +
         '<td class="col-phone"><button class="phone-action" data-id="' + c.id + '" title="Enviar cobrança pelo WhatsApp">' + escapeHtml(formatPhone(c.telefone)) + '</button></td>' +
         '<td class="col-product">' + escapeHtml(c.produto) + '</td>' +
         '<td class="col-due">' + formatDate(c.vencimento) + '</td>' +
@@ -830,7 +482,6 @@
           '<button class="action-btn edit" data-id="' + c.id + '" title="Editar">✏️</button>' +
           '<button class="action-btn delete" data-id="' + c.id + '" title="Excluir">🗑️</button>' +
           '<button class="action-btn whatsapp" data-id="' + c.id + '" title="Enviar cobrança pelo WhatsApp">💬</button>' +
-          '<button class="action-btn copy-message" data-id="' + c.id + '" title="Copiar mensagem de cobrança">📋</button>' +
           '<button class="action-btn renew" data-id="' + c.id + '" title="Renovar">🔄</button>' +
           '<button class="action-btn notify" data-id="' + c.id + '" title="' + (c.avisado ? 'Desmarcar Avisado' : 'Marcar Avisado') + '">' + (c.avisado ? '🔕' : '📢') + '</button>' +
           '<button class="action-btn debit" data-id="' + c.id + '" title="' + (c.debito ? 'Remover Débito' : 'Marcar Débito') + '">' + (c.debito ? '💚' : '💳') + '</button>' +
@@ -841,16 +492,24 @@
         '</tr>';
     }).join('');
 
-    applyVisibilitySettings();
-
     // Bind eventos de checkbox
     tbody.querySelectorAll('.row-check').forEach(function (cb) {
       cb.addEventListener('change', function () { toggleSelect(cb.dataset.id); renderTable(); });
     });
 
-    // Bind clique no nome/telefone para abrir cobrança no WhatsApp
-    tbody.querySelectorAll('.phone-action, .name-action').forEach(function (btn) {
+    // Bind clique no telefone para abrir cobrança no WhatsApp
+    tbody.querySelectorAll('.phone-action').forEach(function (btn) {
       btn.addEventListener('click', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        sendClientMessage(btn.dataset.id);
+      });
+    });
+
+    // Bind clique no nome para abrir cobrança no WhatsApp sem redirecionar a página atual
+    tbody.querySelectorAll('.client-name-action').forEach(function (btn) {
+      btn.addEventListener('click', function (e) {
+        e.preventDefault();
         e.stopPropagation();
         sendClientMessage(btn.dataset.id);
       });
@@ -859,12 +518,12 @@
     // Bind ações individuais
     tbody.querySelectorAll('.action-btn').forEach(function (btn) {
       btn.addEventListener('click', function (e) {
+        e.preventDefault();
         e.stopPropagation();
         var id = btn.dataset.id;
         if (btn.classList.contains('edit')) editClient(id);
         else if (btn.classList.contains('delete')) confirmDelete([id]);
         else if (btn.classList.contains('whatsapp')) sendClientMessage(id);
-        else if (btn.classList.contains('copy-message')) copyClientMessage(id);
         else if (btn.classList.contains('renew')) openRenewModal(id);
         else if (btn.classList.contains('notify')) toggleAvisado(id);
         else if (btn.classList.contains('debit')) toggleDebito(id);
@@ -903,36 +562,6 @@
     return div.innerHTML;
   }
 
-  function applyVisibilitySettings() {
-    var cfg = loadConfig();
-    var columns = Object.assign(defaultColumnVisibility(), cfg.visibleColumns || {});
-    var actions = Object.assign(defaultActionVisibility(), cfg.visibleActions || {});
-    var body = document.body;
-    if (!body) return;
-
-    Object.keys(defaultColumnVisibility()).forEach(function (key) {
-      body.classList.toggle('hide-col-' + key, columns[key] === false);
-    });
-
-    Object.keys(defaultActionVisibility()).forEach(function (key) {
-      body.classList.toggle('hide-action-' + key, actions[key] === false);
-    });
-  }
-
-  function loadSettingsForm() {
-    var cfg = loadConfig();
-
-    document.querySelectorAll('[data-column-toggle]').forEach(function (input) {
-      var key = input.dataset.columnToggle;
-      input.checked = cfg.visibleColumns[key] !== false;
-    });
-
-    document.querySelectorAll('[data-action-toggle]').forEach(function (input) {
-      var key = input.dataset.actionToggle;
-      input.checked = cfg.visibleActions[key] !== false;
-    });
-  }
-
   // ─── Filtros ──────────────────────────────────────────────
 
   function setFilter(f) {
@@ -948,50 +577,6 @@
     renderTable();
     renderStatusBadges();
     updateBatchBar();
-  }
-
-  function isDesktopViewForced() {
-    return localStorage.getItem('pwa_force_desktop_view') === 'true';
-  }
-
-  function applyDesktopViewPreference() {
-    var forced = isDesktopViewForced();
-    if (document.body) {
-      document.body.classList.toggle('force-desktop-view', forced);
-    }
-
-    var btn = document.getElementById('desktopViewBtn');
-    if (btn) {
-      btn.textContent = forced ? '📱 Visualizar como celular' : '🖥️ Visualizar como PC';
-      btn.setAttribute('aria-pressed', String(forced));
-      btn.title = forced ? 'Voltar para visualização mobile' : 'Mostrar a página como no computador';
-    }
-  }
-
-  function toggleDesktopView() {
-    var next = !isDesktopViewForced();
-    localStorage.setItem('pwa_force_desktop_view', String(next));
-    applyDesktopViewPreference();
-
-    var sidebar = document.getElementById('sidebar');
-    if (sidebar) {
-      if (next) {
-        sidebar.classList.remove('collapsed');
-      } else if (window.matchMedia && window.matchMedia('(max-width: 768px)').matches) {
-        sidebar.classList.add('collapsed');
-      }
-    }
-
-    renderTable();
-    showToast(next ? 'Visualização de PC ativada.' : 'Visualização mobile ativada.', 'info');
-  }
-
-  function closeSidebarOnMobile() {
-    var sidebar = document.getElementById('sidebar');
-    if (!sidebar || isDesktopViewForced()) return;
-    if (window.matchMedia && window.matchMedia('(max-width: 768px)').matches) {
-      sidebar.classList.add('collapsed');
-    }
   }
 
   // ─── CRUD de Clientes ─────────────────────────────────────
@@ -1461,31 +1046,24 @@
     return name || 'cliente';
   }
 
-  function greetingByTime() {
-    var hour = new Date().getHours();
-    if (hour >= 5 && hour < 12) return 'Bom dia';
-    if (hour >= 12 && hour < 18) return 'Boa tarde';
-    return 'Boa noite';
-  }
-
-  function monthNameFromDate(value) {
-    var iso = parseDateInput(value);
-    if (!iso) return '';
-    var monthIndex = Number(iso.split('-')[1]) - 1;
-    var months = [
-      'Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
-      'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'
-    ];
-    return months[monthIndex] || '';
-  }
-
   function buildBillingMessage(client) {
-    var vencimento = client && client.vencimento ? formatDate(client.vencimento) : 'sem data';
-    var mes = client && client.vencimento ? monthNameFromDate(client.vencimento) : '';
-    var mesTexto = mes ? ' (' + mes + ')' : '';
+    var name = clientDisplayName(client);
+    var produto = client.produto ? ' ' + client.produto : '';
+    var vencimento = client.vencimento ? formatDate(client.vencimento) : '';
+    var days = diffDays(client.vencimento);
+    var statusText = '';
 
-    return greetingByTime() + '! Lembrete de vencimento ' + vencimento + mesTexto +
-      '.O pagamento via PIX pode ser feito no número: 11947406124 (Waldemar Jose Luiz)';
+    if (vencimento) {
+      if (days < 0) statusText = ' está vencido desde ' + vencimento;
+      else if (days === 0) statusText = ' vence hoje (' + vencimento + ')';
+      else statusText = ' vence em ' + vencimento;
+    } else {
+      statusText = ' precisa de atenção';
+    }
+
+    return 'Olá, ' + name + '! Tudo bem?\n\n' +
+      'Passando para lembrar que seu serviço' + produto + statusText + '.\n' +
+      'Podemos regularizar a renovação?';
   }
 
   function markClientMessageSent(id) {
@@ -1515,55 +1093,17 @@
     }
 
     var url = 'https://wa.me/' + number + '?text=' + encodeURIComponent(buildBillingMessage(client));
-    var opened = window.open(url, '_blank', 'noopener');
-    if (!opened) {
-      window.location.href = url;
+
+    // Importante: não usar window.location.href como fallback aqui.
+    // Em alguns celulares o WhatsApp abre em nova aba/app, mas o navegador retorna null
+    // em window.open; se redirecionarmos com location.href, a página original também sai do app.
+    try {
+      window.open(url, '_blank', 'noopener,noreferrer');
+      return true;
+    } catch (err) {
+      showToast('Não foi possível abrir o WhatsApp. Verifique se pop-ups estão permitidos.', 'warning');
+      return false;
     }
-    return true;
-  }
-
-  function copyTextToClipboard(text) {
-    if (navigator.clipboard && window.isSecureContext) {
-      return navigator.clipboard.writeText(text);
-    }
-
-    return new Promise(function (resolve, reject) {
-      var textarea = document.createElement('textarea');
-      textarea.value = text;
-      textarea.setAttribute('readonly', '');
-      textarea.style.position = 'fixed';
-      textarea.style.top = '-9999px';
-      textarea.style.left = '-9999px';
-      document.body.appendChild(textarea);
-      textarea.focus();
-      textarea.select();
-
-      try {
-        var ok = document.execCommand('copy');
-        document.body.removeChild(textarea);
-        if (ok) resolve();
-        else reject(new Error('copy_failed'));
-      } catch (err) {
-        document.body.removeChild(textarea);
-        reject(err);
-      }
-    });
-  }
-
-  function copyClientMessage(id) {
-    var clients = loadClients();
-    var client = clients.find(function (c) { return String(c.id) === String(id); });
-    if (!client) {
-      showToast('Cliente não encontrado.', 'warning');
-      return;
-    }
-
-    var message = buildBillingMessage(client);
-    copyTextToClipboard(message).then(function () {
-      showToast('Mensagem copiada para ' + clientDisplayName(client), 'success');
-    }).catch(function () {
-      showToast('Não foi possível copiar a mensagem neste navegador.', 'error');
-    });
   }
 
   function sendClientMessage(id) {
@@ -1628,7 +1168,6 @@
     } else {
       document.body.removeAttribute('data-theme');
     }
-
     // Atualizar campos do modal de configurações
     var prim = document.getElementById('themePrimary');
     var acc = document.getElementById('themeAccent');
@@ -1636,9 +1175,6 @@
     if (prim) prim.value = cfg.primaryColor;
     if (acc) acc.value = cfg.accentColor;
     if (dark) dark.checked = cfg.darkMode;
-
-    loadSettingsForm();
-    applyVisibilitySettings();
   }
 
   function saveSettings() {
@@ -1646,20 +1182,8 @@
     cfg.primaryColor = document.getElementById('themePrimary').value;
     cfg.accentColor = document.getElementById('themeAccent').value;
     cfg.darkMode = document.getElementById('darkModeToggle').checked;
-
-    cfg.visibleColumns = Object.assign({}, cfg.visibleColumns || {});
-    document.querySelectorAll('[data-column-toggle]').forEach(function (input) {
-      cfg.visibleColumns[input.dataset.columnToggle] = input.checked;
-    });
-
-    cfg.visibleActions = Object.assign({}, cfg.visibleActions || {});
-    document.querySelectorAll('[data-action-toggle]').forEach(function (input) {
-      cfg.visibleActions[input.dataset.actionToggle] = input.checked;
-    });
-
     saveConfig(cfg);
     applyTheme();
-    renderTable();
     closeModal('settingsModal');
     showToast('Configurações salvas!', 'success');
   }
@@ -1671,10 +1195,7 @@
   window.addEventListener('beforeinstallprompt', function (e) {
     e.preventDefault();
     deferredPrompt = e;
-    var installBtn = document.getElementById('installBtn');
-    var installMenuBtn = document.getElementById('installMenuBtn');
-    if (installBtn) installBtn.hidden = false;
-    if (installMenuBtn) installMenuBtn.disabled = false;
+    document.getElementById('installBtn').hidden = false;
   });
 
   // ─── Registro do Service Worker ───────────────────────────
@@ -1693,102 +1214,18 @@
 
   document.addEventListener('DOMContentLoaded', function () {
     applyTheme();
-    applyDesktopViewPreference();
-    ensureGoogleSheetsControls();
     renderAll();
-    setFilter(currentFilter);
-
-    var toggleMobileFiltersBtn = document.getElementById('toggleMobileFilters');
-    if (toggleMobileFiltersBtn) {
-      toggleMobileFiltersBtn.addEventListener('click', toggleMobileFilters);
-      setMobileFiltersCollapsed(true);
-    }
-
-    loadClientsFromGoogleSheets({ silent: true });
-
-    // No celular o menu começa fechado para não cobrir a lista.
-    var initialSidebar = document.getElementById('sidebar');
-    if (initialSidebar && !isDesktopViewForced() && window.matchMedia && window.matchMedia('(max-width: 768px)').matches) {
-      initialSidebar.classList.add('collapsed');
-    }
 
     // ── Sidebar toggle
     document.getElementById('toggleSidebar').addEventListener('click', function () {
       document.getElementById('sidebar').classList.toggle('collapsed');
     });
 
-    // Evita fechar/aplicar filtro quando o usuário apenas arrasta/rola o menu no celular.
-    var sidebar = document.getElementById('sidebar');
-    var sidebarPointerStartX = 0;
-    var sidebarPointerStartY = 0;
-    var sidebarPointerDragged = false;
-    var sidebarIgnoreClickUntil = 0;
-
-    function isSidebarScrollClick() {
-      return Date.now() < sidebarIgnoreClickUntil || sidebarPointerDragged;
-    }
-
-    if (sidebar) {
-      sidebar.addEventListener('pointerdown', function (event) {
-        sidebarPointerStartX = event.clientX || 0;
-        sidebarPointerStartY = event.clientY || 0;
-        sidebarPointerDragged = false;
-      }, { passive: true });
-
-      sidebar.addEventListener('pointermove', function (event) {
-        var dx = Math.abs((event.clientX || 0) - sidebarPointerStartX);
-        var dy = Math.abs((event.clientY || 0) - sidebarPointerStartY);
-        if (dx > 8 || dy > 8) {
-          sidebarPointerDragged = true;
-          sidebarIgnoreClickUntil = Date.now() + 450;
-        }
-      }, { passive: true });
-
-      sidebar.addEventListener('scroll', function () {
-        sidebarPointerDragged = true;
-        sidebarIgnoreClickUntil = Date.now() + 450;
-      }, { passive: true });
-
-      // Se um arrasto gerar um "click" ao soltar o dedo, cancela antes dos botões receberem.
-      sidebar.addEventListener('click', function (event) {
-        if (isSidebarScrollClick()) {
-          event.preventDefault();
-          event.stopPropagation();
-          sidebarPointerDragged = false;
-        }
-      }, true);
-    }
-
     // ── Filtros da sidebar
     document.querySelectorAll('.sidebar-btn').forEach(function (btn) {
       btn.addEventListener('click', function () {
-        if (isSidebarScrollClick()) return;
         setFilter(btn.dataset.filter);
-        closeSidebarOnMobile();
       });
-    });
-
-    // Fecha o menu no celular somente depois de um toque real em botão/link.
-    if (sidebar) {
-      sidebar.addEventListener('click', function (event) {
-        if (isSidebarScrollClick()) return;
-        var chosen = event.target.closest('button, a');
-        if (!chosen || chosen.id === 'toggleSidebar') return;
-        if (chosen.closest('#sidebar')) {
-          setTimeout(closeSidebarOnMobile, 80);
-        }
-      });
-    }
-
-    window.addEventListener('resize', function () {
-      applyDesktopViewPreference();
-      var s = document.getElementById('sidebar');
-      if (s && !isDesktopViewForced() && window.matchMedia && window.matchMedia('(max-width: 768px)').matches) {
-        s.classList.add('collapsed');
-      }
-      if (!isDesktopViewForced() && isMobileFilterLayout()) {
-        setMobileFiltersCollapsed(true);
-      }
     });
 
     // ── Busca
@@ -1963,30 +1400,15 @@
     document.getElementById('sendNextOverdue').addEventListener('click', sendNextOverdue);
 
     // ── Instalar PWA
-    function handleInstallClick() {
-      if (!deferredPrompt) {
-        showToast('Se o botão de instalação não abrir, use o menu do navegador e escolha "Instalar app" ou "Adicionar à tela inicial".', 'info');
-        return;
-      }
-
+    document.getElementById('installBtn').addEventListener('click', function () {
+      if (!deferredPrompt) return;
       deferredPrompt.prompt();
       deferredPrompt.userChoice.then(function (result) {
         if (result.outcome === 'accepted') showToast('App instalado!', 'success');
         deferredPrompt = null;
-        var installBtn = document.getElementById('installBtn');
-        var installMenuBtn = document.getElementById('installMenuBtn');
-        if (installBtn) installBtn.hidden = true;
-        if (installMenuBtn) installMenuBtn.disabled = false;
+        document.getElementById('installBtn').hidden = true;
       });
-    }
-
-    var headerInstallBtn = document.getElementById('installBtn');
-    var menuInstallBtn = document.getElementById('installMenuBtn');
-    if (headerInstallBtn) headerInstallBtn.addEventListener('click', handleInstallClick);
-    if (menuInstallBtn) menuInstallBtn.addEventListener('click', handleInstallClick);
-
-    var desktopViewBtn = document.getElementById('desktopViewBtn');
-    if (desktopViewBtn) desktopViewBtn.addEventListener('click', toggleDesktopView);
+    });
 
     // ── Importar JSON
     document.getElementById('importBtn').addEventListener('click', function () {
@@ -2000,20 +1422,6 @@
     // ── Exportar tudo
     document.getElementById('exportAllBtn').addEventListener('click', exportAll);
 
-    // ── Google Sheets
-    var syncSheetsBtn = document.getElementById('syncSheetsBtn');
-    if (syncSheetsBtn) {
-      syncSheetsBtn.addEventListener('click', function () {
-        loadClientsFromGoogleSheets({ silent: false });
-      });
-    }
-    var pushSheetsBtn = document.getElementById('pushSheetsBtn');
-    if (pushSheetsBtn) {
-      pushSheetsBtn.addEventListener('click', function () {
-        syncClientsToGoogleSheets(loadClients(), { force: true, showToast: true });
-      });
-    }
-
     // ── Configurações
     document.getElementById('settingsBtn').addEventListener('click', function () {
       applyTheme(); // carrega valores atuais nos inputs
@@ -2023,25 +1431,21 @@
 
     // ── Avisos de conectividade
     window.addEventListener('online', function () {
-      showToast('Conexão restabelecida. Sincronizando com Google Sheets...', 'success');
-      queueGoogleSheetsSave(loadClients());
+      showToast('Conexão restabelecida. O app continua salvando localmente.', 'success');
     });
     window.addEventListener('offline', function () {
-      setSheetsStatus('Sheets: offline', 'warning');
       showToast('Você está offline. Os dados continuam funcionando neste aparelho.', 'warning');
     });
 
     // ── Limpar todos os dados
     document.getElementById('clearAllData').addEventListener('click', function () {
-      if (confirm('ATENÇÃO: Isso apagará TODOS os clientes locais e também enviará a lista vazia ao Google Sheets. Deseja continuar?')) {
-        localStorage.setItem(KEYS.clients, JSON.stringify([]));
+      if (confirm('ATENÇÃO: Isso apagará TODOS os clientes e configurações. Deseja continuar?')) {
+        localStorage.removeItem(KEYS.clients);
         localStorage.removeItem(KEYS.config);
         localStorage.removeItem(KEYS.undoStack);
         localStorage.removeItem(KEYS.redoStack);
-        sheetsLastSavedSignature = '';
         selectedIds.clear();
         renderAll();
-        syncClientsToGoogleSheets([], { force: true, showToast: true });
         closeModal('settingsModal');
         showToast('Todos os dados foram apagados', 'warning');
       }
