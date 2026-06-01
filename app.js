@@ -19,6 +19,39 @@
     return new Date().toISOString().slice(0, 10);
   }
 
+  /** Retorna a data local de hoje + N dias no formato YYYY-MM-DD */
+  function datePlusDaysISO(days) {
+    var d = new Date();
+    d.setHours(12, 0, 0, 0);
+    d.setDate(d.getDate() + Number(days || 0));
+    var y = d.getFullYear();
+    var m = String(d.getMonth() + 1).padStart(2, '0');
+    var day = String(d.getDate()).padStart(2, '0');
+    return y + '-' + m + '-' + day;
+  }
+
+  /** Soma meses de calendário preservando o dia quando possível.
+      Se o mês de destino não tiver o mesmo dia, usa o último dia do mês.
+      Exemplos: 31/01 + 1 mês = 28/02 ou 29/02; 31/03 + 1 mês = 30/04. */
+  function addMonthsISO(value, months) {
+    var normalized = parseDateInput(value) || todayISO();
+    var parts = normalized.split('-').map(function (n) { return parseInt(n, 10); });
+    var year = parts[0];
+    var month = parts[1];
+    var day = parts[2];
+
+    var targetIndex = (month - 1) + Number(months || 0);
+    var targetYear = year + Math.floor(targetIndex / 12);
+    var targetMonthIndex = ((targetIndex % 12) + 12) % 12;
+    var targetMonth = targetMonthIndex + 1;
+    var lastDayOfTargetMonth = new Date(targetYear, targetMonth, 0).getDate();
+    var targetDay = Math.min(day, lastDayOfTargetMonth);
+
+    return String(targetYear).padStart(4, '0') + '-' +
+      String(targetMonth).padStart(2, '0') + '-' +
+      String(targetDay).padStart(2, '0');
+  }
+
   /** Formata data ISO para dd/mm/aaaa */
   function formatDate(iso) {
     if (!iso) return '—';
@@ -34,6 +67,18 @@
     var target = new Date(normalized + 'T00:00:00');
     var now = new Date(todayISO() + 'T00:00:00');
     return Math.round((target - now) / 86400000);
+  }
+
+  /** Retorna true quando o cliente foi colocado em Ver Depois e ainda não chegou a data escolhida. */
+  function isWaitingVerDepois(client, today) {
+    today = today || todayISO();
+    return !!(
+      client &&
+      client.verDepois &&
+      client.verDepois > today &&
+      !client.arquivado &&
+      !client.desativado
+    );
   }
 
   /** Converte datas importadas (YYYY-MM-DD, DD/MM/YYYY ou ISO) para YYYY-MM-DD */
@@ -112,23 +157,357 @@
     redoStack: 'pwa_redo'
   };
 
+  // ─── Google Sheets (Apps Script da versão antiga) ───────────
+  // Mantém o visual moderno, mas usa o mesmo backend da página antiga:
+  // GET  ?action=get_all_clients
+  // POST ?action=bulk_update_clients { clients: [...] }
+  var WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbyHKKeGamiImtqK0G-DJpJI3E_y83ZlVQq6A3kjW0LmRE9iRvNuG3VCOQmpt_s2XwLIrg/exec';
+  var sheetsLoadInProgress = false;
+  var sheetsSaveInProgress = false;
+  var sheetsSavePending = false;
+  var sheetsSaveTimer = null;
+  var sheetsLastSavedSignature = '';
+
+  function canUseGoogleSheets() {
+    return !!WEB_APP_URL && WEB_APP_URL.indexOf('script.google.com/macros/s/') !== -1;
+  }
+
+  function setSheetsStatus(message, type) {
+    var el = document.getElementById('sheetsStatus');
+    if (!el) return;
+    el.textContent = message || 'Sheets: aguardando';
+    el.className = 'last-update sheets-status' + (type ? ' ' + type : '');
+  }
+
+  async function sendRequestToBackend(action, data) {
+    if (!canUseGoogleSheets()) throw new Error('WEB_APP_URL não configurado.');
+    var url = WEB_APP_URL + '?action=' + encodeURIComponent(action);
+    var options = {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify(data || {})
+    };
+
+    if (action === 'get_all_clients') {
+      options.method = 'GET';
+      delete options.body;
+    }
+
+    var response = await fetch(url, options);
+    if (!response.ok) {
+      var errorText = await response.text();
+      throw new Error('Erro de rede ou servidor: ' + response.status + ' - ' + errorText);
+    }
+
+    var result = await response.json();
+    if (result && result.status === 'error') {
+      throw new Error(result.message || 'Erro desconhecido do backend.');
+    }
+    return result;
+  }
+
+  function boolFromSheet(value) {
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'number') return value !== 0;
+    var str = normalizeText(value);
+    return ['true', '1', 'sim', 'yes', 'y', 'x', 'ok'].indexOf(str) !== -1;
+  }
+
+  function dateToSheet(value) {
+    var iso = parseDateInput(value);
+    if (!iso) return '';
+    return formatDate(iso);
+  }
+
+  function productFromName(name) {
+    var match = String(name || '').match(/\(([^)]+)\)\s*$/);
+    return match ? match[1].trim() : '';
+  }
+
+  function sheetLogToHistory(log) {
+    if (!log) return null;
+    if (typeof log === 'string') {
+      return { data: new Date().toISOString(), acao: log };
+    }
+    return {
+      data: log.data || log.date || log.criadoEm || log.t || new Date().toISOString(),
+      acao: String(log.acao || log.action || log.mensagem || log.message || log.a || JSON.stringify(log))
+    };
+  }
+
+  function historyToSheetLogs(history) {
+    if (!Array.isArray(history)) return [];
+    return history.slice(-50).map(function (item) {
+      return {
+        t: item.data || new Date().toISOString(),
+        a: item.acao || item.action || '',
+        e: item.e || item.extra || ''
+      };
+    });
+  }
+
+  function normalizeSheetsClient(item, usedIds) {
+    if (!item || (!item.nome && !item.telefone)) return null;
+
+    var telefone = onlyDigits(item.telefone);
+    var rawId = item.id !== undefined && item.id !== null && String(item.id).trim() !== ''
+      ? String(item.id).trim()
+      : (telefone.length >= 5 ? telefone.slice(-5) : uuid());
+
+    var id = rawId;
+    while (usedIds[id]) id = uuid();
+    usedIds[id] = true;
+
+    var historico = [];
+    if (Array.isArray(item.historico)) {
+      historico = item.historico.slice();
+    } else if (Array.isArray(item.logs)) {
+      historico = item.logs.map(sheetLogToHistory).filter(Boolean);
+    }
+
+    return {
+      id: id,
+      nome: String(item.nome || '').trim(),
+      telefone: telefone,
+      produto: String(item.produto || item.Produto || item.produtoServico || item.servico || productFromName(item.nome) || '').trim(),
+      vencimento: parseDateInput(item.vencimento || item.data || item.Data),
+      observacoes: String(item.observacoes || item.observacao || item.obs || '').trim(),
+      cobranca: parseDateInput(item.cobranca || item.dataCobranca || item.DataCobranca),
+      avisado: boolFromSheet(item.avisado),
+      debito: boolFromSheet(item.debito),
+      arquivado: boolFromSheet(item.arquivado),
+      oculto: boolFromSheet(item.oculto),
+      desativado: boolFromSheet(item.desativado),
+      dola_sent: boolFromSheet(item.dola_sent),
+      clicado: boolFromSheet(item.clicado),
+      verDepois: parseDateInput(item.verDepois || item.reexibirEm),
+      historico: historico,
+      criadoEm: item.criadoEm || new Date().toISOString()
+    };
+  }
+
+  function normalizeSheetsResponse(response) {
+    var raw = Array.isArray(response) ? response :
+      (response && Array.isArray(response.clients)) ? response.clients :
+      (response && Array.isArray(response.data)) ? response.data : [];
+
+    var usedIds = {};
+    return raw.map(function (item) {
+      return normalizeSheetsClient(item, usedIds);
+    }).filter(Boolean);
+  }
+
+  function clientToSheets(client) {
+    return {
+      id: client.id,
+      data: dateToSheet(client.vencimento),
+      nome: client.nome || '',
+      telefone: onlyDigits(client.telefone),
+      avisado: !!client.avisado,
+      debito: !!client.debito,
+      Produto: client.produto || '',
+      arquivado: !!client.arquivado,
+      oculto: !!client.oculto,
+      reexibirEm: dateToSheet(client.verDepois) || null,
+      desativado: !!client.desativado,
+      dola_sent: !!client.dola_sent,
+      clicado: !!client.clicado,
+      dataCobranca: dateToSheet(client.cobranca) || null,
+      observacao: client.observacoes || '',
+      logs: historyToSheetLogs(client.historico)
+    };
+  }
+
+  function sheetsSignature(list) {
+    try {
+      return JSON.stringify((list || []).map(clientToSheets));
+    } catch (e) {
+      return String(Date.now());
+    }
+  }
+
+  async function loadClientsFromGoogleSheets(options) {
+    options = options || {};
+    if (!canUseGoogleSheets()) return loadClients();
+
+    sheetsLoadInProgress = true;
+    setSheetsStatus('Sheets: puxando...', 'syncing');
+    showLoading(true);
+
+    try {
+      var response = await sendRequestToBackend('get_all_clients');
+      var clientsFromSheets = normalizeSheetsResponse(response);
+
+      localStorage.setItem(KEYS.clients, JSON.stringify(clientsFromSheets));
+      sheetsLastSavedSignature = sheetsSignature(clientsFromSheets);
+      selectedIds.clear();
+      updateLastModified();
+      renderAll();
+
+      setSheetsStatus('Sheets: sincronizado', 'ok');
+      if (!options.silent) {
+        showToast('Dados puxados do Google Sheets: ' + clientsFromSheets.length + ' cliente(s).', 'success');
+      }
+      return clientsFromSheets;
+    } catch (error) {
+      console.error('Erro ao puxar do Google Sheets:', error);
+      setSheetsStatus('Sheets: erro ao puxar', 'error');
+      if (!options.silent) {
+        showToast('Erro ao puxar do Google Sheets: ' + error.message, 'error');
+      } else {
+        showToast('Não consegui puxar do Google Sheets. Usando dados locais.', 'warning');
+      }
+      renderAll();
+      return loadClients();
+    } finally {
+      sheetsLoadInProgress = false;
+      showLoading(false);
+    }
+  }
+
+  function queueGoogleSheetsSave(list) {
+    if (!canUseGoogleSheets() || sheetsLoadInProgress) return;
+
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      setSheetsStatus('Sheets: offline', 'warning');
+      return;
+    }
+
+    clearTimeout(sheetsSaveTimer);
+    sheetsSaveTimer = setTimeout(function () {
+      syncClientsToGoogleSheets(list || loadClients());
+    }, 650);
+  }
+
+  async function syncClientsToGoogleSheets(list, options) {
+    options = options || {};
+    if (!canUseGoogleSheets() || sheetsLoadInProgress) return;
+
+    if (sheetsSaveInProgress) {
+      sheetsSavePending = true;
+      return;
+    }
+
+    var clientsToSave = list || loadClients();
+    var signature = sheetsSignature(clientsToSave);
+    if (!options.force && signature === sheetsLastSavedSignature) return;
+
+    sheetsSaveInProgress = true;
+    setSheetsStatus('Sheets: salvando...', 'syncing');
+
+    try {
+      var response = await sendRequestToBackend('bulk_update_clients', {
+        clients: clientsToSave.map(clientToSheets)
+      });
+
+      if (response && response.status && response.status !== 'success') {
+        throw new Error(response.message || 'Erro ao sincronizar com backend.');
+      }
+
+      sheetsLastSavedSignature = signature;
+      setSheetsStatus('Sheets: salvo', 'ok');
+      if (options.showToast) showToast('Dados enviados para o Google Sheets.', 'success');
+    } catch (error) {
+      console.error('Erro ao salvar no Google Sheets:', error);
+      setSheetsStatus('Sheets: erro ao salvar', 'error');
+      showToast('Salvo localmente, mas falhou no Google Sheets: ' + error.message, 'warning');
+    } finally {
+      sheetsSaveInProgress = false;
+      if (sheetsSavePending) {
+        sheetsSavePending = false;
+        queueGoogleSheetsSave(loadClients());
+      }
+    }
+  }
+
+  function ensureGoogleSheetsControls() {
+    setSheetsStatus('Sheets: aguardando', '');
+  }
+
   function loadClients() {
     try { return JSON.parse(localStorage.getItem(KEYS.clients)) || []; }
     catch (e) { return []; }
   }
 
-  function saveClients(list) {
+  function saveClients(list, options) {
+    options = options || {};
     localStorage.setItem(KEYS.clients, JSON.stringify(list));
     updateLastModified();
+    if (!options.skipGoogleSheets) {
+      queueGoogleSheetsSave(list);
+    }
   }
 
-  function loadConfig() {
-    try { return JSON.parse(localStorage.getItem(KEYS.config)) || defaultConfig(); }
-    catch (e) { return defaultConfig(); }
+  function defaultColumnVisibility() {
+    return {
+      select: true,
+      nome: true,
+      telefone: true,
+      produto: true,
+      vencimento: true,
+      cobranca: true,
+      verDepois: true,
+      status: true,
+      acoes: true
+    };
   }
 
-  function saveConfig(cfg) {
-    localStorage.setItem(KEYS.config, JSON.stringify(cfg));
+  function defaultActionVisibility() {
+    return {
+      edit: true,
+      delete: true,
+      whatsapp: true,
+      'copy-message': true,
+      'copy-phone': true,
+      deactivate: true,
+      renew: true,
+      notify: true,
+      debit: true,
+      schedule: true,
+      product: true,
+      history: true
+    };
+  }
+
+  function defaultActionOrder() {
+    return ['edit', 'delete', 'whatsapp', 'copy-message', 'copy-phone', 'deactivate', 'renew', 'notify', 'debit', 'schedule', 'product', 'history'];
+  }
+
+  function actionLabel(key) {
+    var labels = {
+      edit: 'Editar',
+      delete: 'Excluir',
+      whatsapp: 'WhatsApp',
+      'copy-message': 'Copiar mensagem',
+      'copy-phone': 'Copiar telefone',
+      deactivate: 'Desativar/Reativar',
+      renew: 'Renovar',
+      notify: 'Avisado',
+      debit: 'Débito',
+      schedule: 'Ver Depois',
+      product: 'Produto',
+      history: 'Histórico'
+    };
+    return labels[key] || key;
+  }
+
+  function normalizeActionOrder(order) {
+    var defaults = defaultActionOrder();
+    var valid = {};
+    defaults.forEach(function (key) { valid[key] = true; });
+
+    var result = [];
+    if (Array.isArray(order)) {
+      order.forEach(function (key) {
+        if (valid[key] && result.indexOf(key) === -1) result.push(key);
+      });
+    }
+
+    defaults.forEach(function (key) {
+      if (result.indexOf(key) === -1) result.push(key);
+    });
+
+    return result;
   }
 
   function defaultConfig() {
@@ -136,8 +515,42 @@
       primaryColor: '#0d9488',
       accentColor: '#7c3aed',
       darkMode: false,
-      lastModified: null
+      lastModified: null,
+      visibleColumns: defaultColumnVisibility(),
+      visibleActions: defaultActionVisibility(),
+      actionOrder: defaultActionOrder(),
+      dateSortOrder: 'asc'
     };
+  }
+
+  function normalizeDateSortOrder(value) {
+    return value === 'desc' ? 'desc' : 'asc';
+  }
+
+  function defaultSortOrderLabel(value) {
+    return normalizeDateSortOrder(value) === 'desc'
+      ? 'Data: mais nova para mais velha'
+      : 'Data: mais velha para mais nova';
+  }
+
+  function mergeConfig(stored) {
+    var defaults = defaultConfig();
+    stored = stored || {};
+    return Object.assign({}, defaults, stored, {
+      visibleColumns: Object.assign({}, defaults.visibleColumns, stored.visibleColumns || {}),
+      visibleActions: Object.assign({}, defaults.visibleActions, stored.visibleActions || {}),
+      actionOrder: normalizeActionOrder(stored.actionOrder || defaults.actionOrder),
+      dateSortOrder: normalizeDateSortOrder(stored.dateSortOrder || defaults.dateSortOrder)
+    });
+  }
+
+  function loadConfig() {
+    try { return mergeConfig(JSON.parse(localStorage.getItem(KEYS.config)) || {}); }
+    catch (e) { return defaultConfig(); }
+  }
+
+  function saveConfig(cfg) {
+    localStorage.setItem(KEYS.config, JSON.stringify(mergeConfig(cfg)));
   }
 
   function updateLastModified() {
@@ -267,7 +680,7 @@
 
   function countStatuses(clients) {
     var counts = {
-      all: 0, ativo: 0, 'vencendo-hoje': 0, 'proximo-vencimento': 0,
+      all: 0, ativo: 0, 'vencendo-hoje': 0, 'hoje-vencidos': 0, 'proximo-vencimento': 0,
       vencido: 0, 'cobranca-hoje': 0, 'ver-depois': 0, avisado: 0, debito: 0,
       arquivado: 0, desativado: 0
     };
@@ -275,7 +688,14 @@
     clients.forEach(function (c) {
       counts.all++;
       var s = getStatus(c);
-      if (counts[s] !== undefined) counts[s]++;
+      var waitingVerDepois = isWaitingVerDepois(c, today);
+      var isDueStatus = s === 'vencendo-hoje' || s === 'vencido' || s === 'proximo-vencimento';
+
+      // Quando o cliente estiver em "Ver Depois" com data futura,
+      // ele não entra nos contadores de vencimento até chegar a data escolhida.
+      if (!(waitingVerDepois && isDueStatus) && counts[s] !== undefined) counts[s]++;
+
+      if (!waitingVerDepois && (s === 'vencendo-hoje' || s === 'vencido')) counts['hoje-vencidos']++;
       if (c.cobranca === today && !c.arquivado && !c.desativado) counts['cobranca-hoje']++;
       if (c.verDepois && c.verDepois <= today && !c.arquivado && !c.desativado) counts['ver-depois']++;
     });
@@ -284,7 +704,7 @@
 
   // ─── Filtro e Busca ───────────────────────────────────────
 
-  var currentFilter = 'all';
+  var currentFilter = 'hoje-vencidos';
   var currentSearch = '';
   var currentProdutoFilter = '';
   var currentVencimentoFilter = '';
@@ -295,12 +715,21 @@
       // Filtro de status
       if (currentFilter !== 'all') {
         var s = getStatus(c);
+        var waitingVerDepois = isWaitingVerDepois(c, today);
+
         if (currentFilter === 'cobranca-hoje') {
           if (c.cobranca !== today || c.arquivado || c.desativado) return false;
+        } else if (currentFilter === 'hoje-vencidos') {
+          if (waitingVerDepois) return false;
+          if (s !== 'vencendo-hoje' && s !== 'vencido') return false;
         } else if (currentFilter === 'ver-depois') {
           if (!c.verDepois || c.verDepois > today || c.arquivado || c.desativado) return false;
         } else if (currentFilter === 'proximo-vencimento') {
+          if (waitingVerDepois) return false;
           if (s !== 'proximo-vencimento') return false;
+        } else if (currentFilter === 'vencendo-hoje' || currentFilter === 'vencido') {
+          if (waitingVerDepois) return false;
+          if (s !== currentFilter) return false;
         } else if (s !== currentFilter) {
           return false;
         }
@@ -386,6 +815,7 @@
     renderStatusBadges();
     renderTable();
     renderProdutoFilter();
+    applyVisibilitySettings();
     updateBatchBar();
     updateUndoRedoButtons();
     refreshLastModified();
@@ -397,6 +827,7 @@
     setText('countAll', counts.all);
     setText('countAtivo', counts.ativo);
     setText('countVencendoHoje', counts['vencendo-hoje']);
+    setText('countHojeVencidos', counts['hoje-vencidos']);
     setText('countProximoVenc', counts['proximo-vencimento']);
     setText('countVencido', counts.vencido);
     setText('countCobrancaHoje', counts['cobranca-hoje']);
@@ -420,6 +851,7 @@
     var badges = [
       { key: 'ativo', icon: '✅', label: 'Ativos', cls: 'badge-ativo' },
       { key: 'vencendo-hoje', icon: '⏰', label: 'Vencendo Hoje', cls: 'badge-vencendo-hoje' },
+      { key: 'hoje-vencidos', icon: '🔥', label: 'Vencendo Hoje + Vencidos', cls: 'badge-vencido' },
       { key: 'proximo-vencimento', icon: '⚠️', label: 'Próx. Venc.', cls: 'badge-proximo' },
       { key: 'vencido', icon: '❌', label: 'Vencidos', cls: 'badge-vencido' },
       { key: 'avisado', icon: '📢', label: 'Avisados', cls: 'badge-avisado' },
@@ -428,7 +860,7 @@
       { key: 'ver-depois', icon: '⏳', label: 'Ver Depois', cls: 'badge-proximo' }
     ];
     container.innerHTML = badges.map(function (b) {
-      return '<div class="status-card ' + b.cls + '" data-filter="' + b.key + '" title="Filtrar por ' + b.label + '">' +
+      return '<div class="status-card ' + b.cls + (b.key === currentFilter ? ' active' : '') + '" data-filter="' + b.key + '" title="Filtrar por ' + b.label + '">' +
         '<span class="card-icon status-card-icon">' + b.icon + '</span>' +
         '<span class="card-count status-card-count">' + (counts[b.key] || 0) + '</span>' +
         '<span class="card-label status-card-label">' + b.label + '</span>' +
@@ -438,8 +870,101 @@
     container.querySelectorAll('.status-card').forEach(function (card) {
       card.addEventListener('click', function () {
         setFilter(card.dataset.filter);
+        if (isMobileFilterLayout()) {
+          setMobileFiltersCollapsed(true);
+        }
       });
     });
+  }
+
+  function isMobileFilterLayout() {
+    return !!(window.matchMedia && window.matchMedia('(max-width: 900px)').matches);
+  }
+
+  function setMobileFiltersCollapsed(collapsed) {
+    var badges = document.getElementById('statusBadges');
+    var btn = document.getElementById('toggleMobileFilters');
+    if (!badges || !btn) return;
+
+    badges.classList.toggle('mobile-collapsed', !!collapsed);
+    btn.setAttribute('aria-expanded', String(!collapsed));
+    btn.textContent = collapsed ? '🔎 Mostrar filtros rápidos' : '🔼 Recolher filtros rápidos';
+  }
+
+  function toggleMobileFilters() {
+    var badges = document.getElementById('statusBadges');
+    if (!badges) return;
+    setMobileFiltersCollapsed(!badges.classList.contains('mobile-collapsed'));
+  }
+
+  function compareClientsByDueDate(a, b, sortOrder) {
+    var direction = normalizeDateSortOrder(sortOrder) === 'desc' ? -1 : 1;
+    var da = parseDateInput(a && a.vencimento);
+    var db = parseDateInput(b && b.vencimento);
+
+    if (da && db && da !== db) return da.localeCompare(db) * direction;
+    if (da && !db) return -1;
+    if (!da && db) return 1;
+
+    var na = normalizeText(a && a.nome);
+    var nb = normalizeText(b && b.nome);
+    return na.localeCompare(nb);
+  }
+
+  function renderActionButton(action, c) {
+    var idAttr = ' data-id="' + c.id + '"';
+    var title;
+    var icon;
+
+    if (action === 'edit') {
+      title = 'Editar';
+      icon = '✏️';
+    } else if (action === 'delete') {
+      title = 'Excluir';
+      icon = '🗑️';
+    } else if (action === 'whatsapp') {
+      title = 'Enviar cobrança pelo WhatsApp';
+      icon = '💬';
+    } else if (action === 'copy-message') {
+      title = 'Copiar mensagem de cobrança';
+      icon = '📋';
+    } else if (action === 'copy-phone') {
+      title = 'Copiar telefone do cliente';
+      icon = '📞';
+    } else if (action === 'deactivate') {
+      title = c.desativado ? 'Reativar cliente' : 'Desativar cliente';
+      icon = c.desativado ? '✅' : '🚫';
+    } else if (action === 'renew') {
+      title = 'Renovar +1 mês';
+      icon = '🔄';
+    } else if (action === 'notify') {
+      title = c.avisado ? 'Desmarcar Avisado' : 'Marcar Avisado';
+      icon = c.avisado ? '🔕' : '📢';
+    } else if (action === 'debit') {
+      title = c.debito ? 'Remover Débito' : 'Marcar Débito';
+      icon = c.debito ? '💚' : '💳';
+    } else if (action === 'schedule') {
+      title = 'Ver Depois';
+      icon = '⏳';
+    } else if (action === 'product') {
+      title = 'Alterar Produto';
+      icon = '🏷️';
+    } else if (action === 'history') {
+      title = 'Histórico';
+      icon = '📜';
+    } else {
+      return '';
+    }
+
+    return '<button class="action-btn ' + action + '"' + idAttr + ' title="' + escapeHtml(title) + '">' + icon + '</button>';
+  }
+
+  function renderClientActions(c) {
+    var cfg = loadConfig();
+    var order = normalizeActionOrder(cfg.actionOrder);
+    return order.map(function (action) {
+      return renderActionButton(action, c);
+    }).join('');
   }
 
   function renderTable() {
@@ -456,12 +981,10 @@
     }
     if (empty) empty.hidden = true;
 
-    // Ordenar: vencidos primeiro, depois por data de vencimento
+    // Ordena a lista pela data de vencimento conforme a preferência salva em Configurações.
+    var cfg = loadConfig();
     filtered.sort(function (a, b) {
-      var sa = getStatus(a), sb = getStatus(b);
-      var order = { 'vencido': 0, 'vencendo-hoje': 1, 'proximo-vencimento': 2, 'debito': 3, 'avisado': 4, 'ativo': 5, 'arquivado': 6, 'desativado': 7 };
-      if (order[sa] !== order[sb]) return (order[sa] || 99) - (order[sb] || 99);
-      return (a.vencimento || '').localeCompare(b.vencimento || '');
+      return compareClientsByDueDate(a, b, cfg.dateSortOrder);
     });
 
     tbody.innerHTML = filtered.map(function (c) {
@@ -471,45 +994,27 @@
       var selCls = selectedIds.has(c.id) ? ' selected' : '';
       return '<tr class="' + rowCls + selCls + '" data-id="' + c.id + '">' +
         '<td class="col-check"><input type="checkbox" class="row-check" data-id="' + c.id + '" ' + checked + ' /></td>' +
-        '<td class="col-name"><button type="button" class="client-name-action" data-id="' + c.id + '" title="Enviar cobrança pelo WhatsApp">' + escapeHtml(c.nome) + '</button></td>' +
+        '<td class="col-name"><button class="name-action" data-id="' + c.id + '" title="Enviar cobrança pelo WhatsApp">' + escapeHtml(c.nome) + '</button></td>' +
         '<td class="col-phone"><button class="phone-action" data-id="' + c.id + '" title="Enviar cobrança pelo WhatsApp">' + escapeHtml(formatPhone(c.telefone)) + '</button></td>' +
         '<td class="col-product">' + escapeHtml(c.produto) + '</td>' +
         '<td class="col-due">' + formatDate(c.vencimento) + '</td>' +
         '<td class="col-billing">' + formatDate(c.cobranca) + '</td>' +
         '<td class="col-review">' + formatDate(c.verDepois) + '</td>' +
         '<td class="col-status"><span class="badge ' + statusBadgeClass(s) + '">' + statusLabel(s) + '</span></td>' +
-        '<td class="col-actions">' +
-          '<button class="action-btn edit" data-id="' + c.id + '" title="Editar">✏️</button>' +
-          '<button class="action-btn delete" data-id="' + c.id + '" title="Excluir">🗑️</button>' +
-          '<button class="action-btn whatsapp" data-id="' + c.id + '" title="Enviar cobrança pelo WhatsApp">💬</button>' +
-          '<button class="action-btn renew" data-id="' + c.id + '" title="Renovar">🔄</button>' +
-          '<button class="action-btn notify" data-id="' + c.id + '" title="' + (c.avisado ? 'Desmarcar Avisado' : 'Marcar Avisado') + '">' + (c.avisado ? '🔕' : '📢') + '</button>' +
-          '<button class="action-btn debit" data-id="' + c.id + '" title="' + (c.debito ? 'Remover Débito' : 'Marcar Débito') + '">' + (c.debito ? '💚' : '💳') + '</button>' +
-          '<button class="action-btn schedule" data-id="' + c.id + '" title="Ver Depois">⏳</button>' +
-          '<button class="action-btn product" data-id="' + c.id + '" title="Alterar Produto">🏷️</button>' +
-          '<button class="action-btn history" data-id="' + c.id + '" title="Histórico">📜</button>' +
-        '</td>' +
+        '<td class="col-actions">' + renderClientActions(c) + '</td>' +
         '</tr>';
     }).join('');
+
+    applyVisibilitySettings();
 
     // Bind eventos de checkbox
     tbody.querySelectorAll('.row-check').forEach(function (cb) {
       cb.addEventListener('change', function () { toggleSelect(cb.dataset.id); renderTable(); });
     });
 
-    // Bind clique no telefone para abrir cobrança no WhatsApp
-    tbody.querySelectorAll('.phone-action').forEach(function (btn) {
+    // Bind clique no nome/telefone para abrir cobrança no WhatsApp
+    tbody.querySelectorAll('.phone-action, .name-action').forEach(function (btn) {
       btn.addEventListener('click', function (e) {
-        e.preventDefault();
-        e.stopPropagation();
-        sendClientMessage(btn.dataset.id);
-      });
-    });
-
-    // Bind clique no nome para abrir cobrança no WhatsApp sem redirecionar a página atual
-    tbody.querySelectorAll('.client-name-action').forEach(function (btn) {
-      btn.addEventListener('click', function (e) {
-        e.preventDefault();
         e.stopPropagation();
         sendClientMessage(btn.dataset.id);
       });
@@ -518,13 +1023,15 @@
     // Bind ações individuais
     tbody.querySelectorAll('.action-btn').forEach(function (btn) {
       btn.addEventListener('click', function (e) {
-        e.preventDefault();
         e.stopPropagation();
         var id = btn.dataset.id;
         if (btn.classList.contains('edit')) editClient(id);
         else if (btn.classList.contains('delete')) confirmDelete([id]);
         else if (btn.classList.contains('whatsapp')) sendClientMessage(id);
-        else if (btn.classList.contains('renew')) openRenewModal(id);
+        else if (btn.classList.contains('copy-message')) copyClientMessage(id);
+        else if (btn.classList.contains('copy-phone')) copyClientPhone(id);
+        else if (btn.classList.contains('deactivate')) toggleDesativado(id);
+        else if (btn.classList.contains('renew')) doRenewNextMonth(id);
         else if (btn.classList.contains('notify')) toggleAvisado(id);
         else if (btn.classList.contains('debit')) toggleDebito(id);
         else if (btn.classList.contains('schedule')) openVerDepois(id);
@@ -562,6 +1069,140 @@
     return div.innerHTML;
   }
 
+  function applyVisibilitySettings() {
+    var cfg = loadConfig();
+    var columns = Object.assign(defaultColumnVisibility(), cfg.visibleColumns || {});
+    var actions = Object.assign(defaultActionVisibility(), cfg.visibleActions || {});
+    var body = document.body;
+    if (!body) return;
+
+    Object.keys(defaultColumnVisibility()).forEach(function (key) {
+      body.classList.toggle('hide-col-' + key, columns[key] === false);
+    });
+
+    Object.keys(defaultActionVisibility()).forEach(function (key) {
+      body.classList.toggle('hide-action-' + key, actions[key] === false);
+    });
+  }
+
+  function loadSettingsForm() {
+    var cfg = loadConfig();
+
+    var dateSortOrder = document.getElementById('dateSortOrder');
+    if (dateSortOrder) {
+      dateSortOrder.value = normalizeDateSortOrder(cfg.dateSortOrder);
+      dateSortOrder.title = defaultSortOrderLabel(cfg.dateSortOrder);
+    }
+
+    document.querySelectorAll('[data-column-toggle]').forEach(function (input) {
+      var key = input.dataset.columnToggle;
+      input.checked = cfg.visibleColumns[key] !== false;
+    });
+
+    document.querySelectorAll('[data-action-toggle]').forEach(function (input) {
+      var key = input.dataset.actionToggle;
+      input.checked = cfg.visibleActions[key] !== false;
+    });
+
+    renderActionOrderSettings(cfg.actionOrder);
+  }
+
+  function renderActionOrderSettings(order) {
+    var container = document.getElementById('actionOrderSettings');
+    if (!container) return;
+
+    var normalized = normalizeActionOrder(order);
+    container.innerHTML = normalized.map(function (key, index) {
+      return '<div class="action-order-item" draggable="true" data-action-order-item data-action-key="' + key + '">' +
+        '<span class="action-order-grip" aria-hidden="true" title="Arraste para reorganizar">☰</span>' +
+        '<span class="action-order-name">' + escapeHtml(actionLabel(key)) + '</span>' +
+        '<div class="action-order-controls">' +
+          '<button type="button" class="order-btn" data-move-action="up" title="Subir" ' + (index === 0 ? 'disabled' : '') + '>▲</button>' +
+          '<button type="button" class="order-btn" data-move-action="down" title="Descer" ' + (index === normalized.length - 1 ? 'disabled' : '') + '>▼</button>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+    setupActionOrderDragAndDrop();
+  }
+
+  function readActionOrderFromSettings() {
+    var rows = document.querySelectorAll('#actionOrderSettings [data-action-order-item]');
+    var order = Array.prototype.map.call(rows, function (row) {
+      return row.dataset.actionKey;
+    });
+    return normalizeActionOrder(order);
+  }
+
+  function moveActionOrderItem(button) {
+    var row = button.closest('[data-action-order-item]');
+    var list = document.getElementById('actionOrderSettings');
+    if (!row || !list) return;
+
+    if (button.dataset.moveAction === 'up' && row.previousElementSibling) {
+      list.insertBefore(row, row.previousElementSibling);
+    } else if (button.dataset.moveAction === 'down' && row.nextElementSibling) {
+      list.insertBefore(row.nextElementSibling, row);
+    }
+
+    var order = readActionOrderFromSettings();
+    renderActionOrderSettings(order);
+  }
+
+  function setupActionOrderDragAndDrop() {
+    var list = document.getElementById('actionOrderSettings');
+    if (!list || list.dataset.dragReady === 'true') return;
+    list.dataset.dragReady = 'true';
+
+    var draggedItem = null;
+
+    function getDragAfterElement(container, y) {
+      var items = Array.prototype.slice.call(container.querySelectorAll('[data-action-order-item]:not(.dragging)'));
+      return items.reduce(function (closest, child) {
+        var box = child.getBoundingClientRect();
+        var offset = y - box.top - (box.height / 2);
+        if (offset < 0 && offset > closest.offset) {
+          return { offset: offset, element: child };
+        }
+        return closest;
+      }, { offset: Number.NEGATIVE_INFINITY, element: null }).element;
+    }
+
+    list.addEventListener('dragstart', function (event) {
+      var item = event.target.closest('[data-action-order-item]');
+      if (!item) return;
+
+      draggedItem = item;
+      item.classList.add('dragging');
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData('text/plain', item.dataset.actionKey || '');
+      }
+    });
+
+    list.addEventListener('dragover', function (event) {
+      if (!draggedItem) return;
+      event.preventDefault();
+
+      var afterElement = getDragAfterElement(list, event.clientY);
+      if (afterElement == null) {
+        list.appendChild(draggedItem);
+      } else {
+        list.insertBefore(draggedItem, afterElement);
+      }
+    });
+
+    list.addEventListener('drop', function (event) {
+      if (!draggedItem) return;
+      event.preventDefault();
+    });
+
+    list.addEventListener('dragend', function () {
+      if (draggedItem) draggedItem.classList.remove('dragging');
+      draggedItem = null;
+      renderActionOrderSettings(readActionOrderFromSettings());
+    });
+  }
+
   // ─── Filtros ──────────────────────────────────────────────
 
   function setFilter(f) {
@@ -577,6 +1218,50 @@
     renderTable();
     renderStatusBadges();
     updateBatchBar();
+  }
+
+  function isDesktopViewForced() {
+    return localStorage.getItem('pwa_force_desktop_view') === 'true';
+  }
+
+  function applyDesktopViewPreference() {
+    var forced = isDesktopViewForced();
+    if (document.body) {
+      document.body.classList.toggle('force-desktop-view', forced);
+    }
+
+    var btn = document.getElementById('desktopViewBtn');
+    if (btn) {
+      btn.textContent = forced ? '📱 Visualizar como celular' : '🖥️ Visualizar como PC';
+      btn.setAttribute('aria-pressed', String(forced));
+      btn.title = forced ? 'Voltar para visualização mobile' : 'Mostrar a página como no computador';
+    }
+  }
+
+  function toggleDesktopView() {
+    var next = !isDesktopViewForced();
+    localStorage.setItem('pwa_force_desktop_view', String(next));
+    applyDesktopViewPreference();
+
+    var sidebar = document.getElementById('sidebar');
+    if (sidebar) {
+      if (next) {
+        sidebar.classList.remove('collapsed');
+      } else if (window.matchMedia && window.matchMedia('(max-width: 768px)').matches) {
+        sidebar.classList.add('collapsed');
+      }
+    }
+
+    renderTable();
+    showToast(next ? 'Visualização de PC ativada.' : 'Visualização mobile ativada.', 'info');
+  }
+
+  function closeSidebarOnMobile() {
+    var sidebar = document.getElementById('sidebar');
+    if (!sidebar || isDesktopViewForced()) return;
+    if (window.matchMedia && window.matchMedia('(max-width: 768px)').matches) {
+      sidebar.classList.add('collapsed');
+    }
   }
 
   // ─── CRUD de Clientes ─────────────────────────────────────
@@ -680,6 +1365,21 @@
     showToast(c.debito ? 'Cliente marcado em débito' : 'Débito removido', 'info');
   }
 
+  function toggleDesativado(id) {
+    pushUndo();
+    var clients = loadClients();
+    var c = clients.find(function (cl) { return cl.id === id; });
+    if (!c) return;
+
+    c.desativado = !c.desativado;
+    c.historico = c.historico || [];
+    c.historico.push({ data: new Date().toISOString(), acao: c.desativado ? 'Cliente desativado' : 'Cliente reativado' });
+
+    saveClients(clients);
+    renderAll();
+    showToast(c.desativado ? 'Cliente desativado' : 'Cliente reativado', c.desativado ? 'warning' : 'success');
+  }
+
   // ─── Modais ───────────────────────────────────────────────
 
   function openModal(id) {
@@ -747,6 +1447,29 @@
     showToast('Vencimento renovado!', 'success');
   }
 
+  function doRenewNextMonth(id) {
+    pushUndo();
+    var clients = loadClients();
+    var c = clients.find(function (cl) { return cl.id === id; });
+    if (!c) return;
+
+    var baseDate = parseDateInput(c.vencimento) || todayISO();
+    var newDate = addMonthsISO(baseDate, 1);
+
+    c.vencimento = newDate;
+    c.avisado = false;
+    c.verDepois = '';
+    c.historico = c.historico || [];
+    c.historico.push({
+      data: new Date().toISOString(),
+      acao: 'Vencimento renovado automaticamente +1 mês: ' + formatDate(baseDate) + ' → ' + formatDate(newDate)
+    });
+
+    saveClients(clients);
+    renderAll();
+    showToast('Renovado para ' + formatDate(newDate), 'success');
+  }
+
   // ─── Modal: Histórico ─────────────────────────────────────
 
   function openHistory(id) {
@@ -773,10 +1496,16 @@
 
   function openVerDepois(id) {
     pendingVerDepoisIds = Array.isArray(id) ? id : [id];
-    var d = new Date();
-    d.setDate(d.getDate() + 7);
-    document.getElementById('verDepoisDate').value = d.toISOString().slice(0, 10);
+    document.getElementById('verDepoisDate').value = datePlusDaysISO(1);
     openModal('verDepoisModal');
+  }
+
+  function applyVerDepoisQuick(days) {
+    var date = datePlusDaysISO(days);
+    var input = document.getElementById('verDepoisDate');
+    if (input) input.value = date;
+    doVerDepois(pendingVerDepoisIds, date);
+    closeModal('verDepoisModal');
   }
 
   function doVerDepois(ids, date) {
@@ -880,6 +1609,35 @@
     selectedIds.clear();
     renderAll();
     showToast('Vencimento renovado para ' + ids.length + ' cliente(s)', 'success');
+  }
+
+  function doBatchRenewNextMonth(markDebit) {
+    var ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+
+    pushUndo();
+    var clients = loadClients();
+    clients.forEach(function (c) {
+      if (ids.indexOf(c.id) === -1) return;
+
+      var baseDate = parseDateInput(c.vencimento) || todayISO();
+      var newDate = addMonthsISO(baseDate, 1);
+
+      c.vencimento = newDate;
+      if (markDebit) c.debito = true;
+      c.avisado = false;
+      c.verDepois = '';
+      c.historico = c.historico || [];
+      c.historico.push({
+        data: new Date().toISOString(),
+        acao: 'Vencimento renovado em lote +1 mês: ' + formatDate(baseDate) + ' → ' + formatDate(newDate)
+      });
+    });
+
+    saveClients(clients);
+    selectedIds.clear();
+    renderAll();
+    showToast('Renovado +1 mês para ' + ids.length + ' cliente(s)', 'success');
   }
 
   function doBatchSetProduto(produto) {
@@ -1046,24 +1804,31 @@
     return name || 'cliente';
   }
 
+  function greetingByTime() {
+    var hour = new Date().getHours();
+    if (hour >= 5 && hour < 12) return 'Bom dia';
+    if (hour >= 12 && hour < 18) return 'Boa tarde';
+    return 'Boa noite';
+  }
+
+  function monthNameFromDate(value) {
+    var iso = parseDateInput(value);
+    if (!iso) return '';
+    var monthIndex = Number(iso.split('-')[1]) - 1;
+    var months = [
+      'Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
+      'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'
+    ];
+    return months[monthIndex] || '';
+  }
+
   function buildBillingMessage(client) {
-    var name = clientDisplayName(client);
-    var produto = client.produto ? ' ' + client.produto : '';
-    var vencimento = client.vencimento ? formatDate(client.vencimento) : '';
-    var days = diffDays(client.vencimento);
-    var statusText = '';
+    var vencimento = client && client.vencimento ? formatDate(client.vencimento) : 'sem data';
+    var mes = client && client.vencimento ? monthNameFromDate(client.vencimento) : '';
+    var mesTexto = mes ? ' (' + mes + ')' : '';
 
-    if (vencimento) {
-      if (days < 0) statusText = ' está vencido desde ' + vencimento;
-      else if (days === 0) statusText = ' vence hoje (' + vencimento + ')';
-      else statusText = ' vence em ' + vencimento;
-    } else {
-      statusText = ' precisa de atenção';
-    }
-
-    return 'Olá, ' + name + '! Tudo bem?\n\n' +
-      'Passando para lembrar que seu serviço' + produto + statusText + '.\n' +
-      'Podemos regularizar a renovação?';
+    return greetingByTime() + '! Lembrete de vencimento ' + vencimento + mesTexto +
+      '.O pagamento via PIX pode ser feito no número: 11947406124 (Waldemar Jose Luiz)';
   }
 
   function markClientMessageSent(id) {
@@ -1093,17 +1858,73 @@
     }
 
     var url = 'https://wa.me/' + number + '?text=' + encodeURIComponent(buildBillingMessage(client));
+    window.open(url, '_blank', 'noopener');
+    return true;
+  }
 
-    // Importante: não usar window.location.href como fallback aqui.
-    // Em alguns celulares o WhatsApp abre em nova aba/app, mas o navegador retorna null
-    // em window.open; se redirecionarmos com location.href, a página original também sai do app.
-    try {
-      window.open(url, '_blank', 'noopener,noreferrer');
-      return true;
-    } catch (err) {
-      showToast('Não foi possível abrir o WhatsApp. Verifique se pop-ups estão permitidos.', 'warning');
-      return false;
+  function copyTextToClipboard(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      return navigator.clipboard.writeText(text);
     }
+
+    return new Promise(function (resolve, reject) {
+      var textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.setAttribute('readonly', '');
+      textarea.style.position = 'fixed';
+      textarea.style.top = '-9999px';
+      textarea.style.left = '-9999px';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+
+      try {
+        var ok = document.execCommand('copy');
+        document.body.removeChild(textarea);
+        if (ok) resolve();
+        else reject(new Error('copy_failed'));
+      } catch (err) {
+        document.body.removeChild(textarea);
+        reject(err);
+      }
+    });
+  }
+
+  function copyClientMessage(id) {
+    var clients = loadClients();
+    var client = clients.find(function (c) { return String(c.id) === String(id); });
+    if (!client) {
+      showToast('Cliente não encontrado.', 'warning');
+      return;
+    }
+
+    var message = buildBillingMessage(client);
+    copyTextToClipboard(message).then(function () {
+      showToast('Mensagem copiada para ' + clientDisplayName(client), 'success');
+    }).catch(function () {
+      showToast('Não foi possível copiar a mensagem neste navegador.', 'error');
+    });
+  }
+
+  function copyClientPhone(id) {
+    var clients = loadClients();
+    var client = clients.find(function (c) { return String(c.id) === String(id); });
+    if (!client) {
+      showToast('Cliente não encontrado.', 'warning');
+      return;
+    }
+
+    var phone = onlyDigits(client.telefone) || String(client.telefone || '').trim();
+    if (!phone) {
+      showToast('Cliente sem telefone cadastrado.', 'warning');
+      return;
+    }
+
+    copyTextToClipboard(phone).then(function () {
+      showToast('Telefone copiado: ' + formatPhone(phone), 'success');
+    }).catch(function () {
+      showToast('Não foi possível copiar o telefone neste navegador.', 'error');
+    });
   }
 
   function sendClientMessage(id) {
@@ -1168,6 +1989,7 @@
     } else {
       document.body.removeAttribute('data-theme');
     }
+
     // Atualizar campos do modal de configurações
     var prim = document.getElementById('themePrimary');
     var acc = document.getElementById('themeAccent');
@@ -1175,6 +1997,9 @@
     if (prim) prim.value = cfg.primaryColor;
     if (acc) acc.value = cfg.accentColor;
     if (dark) dark.checked = cfg.darkMode;
+
+    loadSettingsForm();
+    applyVisibilitySettings();
   }
 
   function saveSettings() {
@@ -1182,8 +2007,25 @@
     cfg.primaryColor = document.getElementById('themePrimary').value;
     cfg.accentColor = document.getElementById('themeAccent').value;
     cfg.darkMode = document.getElementById('darkModeToggle').checked;
+
+    var dateSortOrder = document.getElementById('dateSortOrder');
+    cfg.dateSortOrder = dateSortOrder ? normalizeDateSortOrder(dateSortOrder.value) : normalizeDateSortOrder(cfg.dateSortOrder);
+
+    cfg.visibleColumns = Object.assign({}, cfg.visibleColumns || {});
+    document.querySelectorAll('[data-column-toggle]').forEach(function (input) {
+      cfg.visibleColumns[input.dataset.columnToggle] = input.checked;
+    });
+
+    cfg.visibleActions = Object.assign({}, cfg.visibleActions || {});
+    document.querySelectorAll('[data-action-toggle]').forEach(function (input) {
+      cfg.visibleActions[input.dataset.actionToggle] = input.checked;
+    });
+
+    cfg.actionOrder = readActionOrderFromSettings();
+
     saveConfig(cfg);
     applyTheme();
+    renderTable();
     closeModal('settingsModal');
     showToast('Configurações salvas!', 'success');
   }
@@ -1195,7 +2037,10 @@
   window.addEventListener('beforeinstallprompt', function (e) {
     e.preventDefault();
     deferredPrompt = e;
-    document.getElementById('installBtn').hidden = false;
+    var installBtn = document.getElementById('installBtn');
+    var installMenuBtn = document.getElementById('installMenuBtn');
+    if (installBtn) installBtn.hidden = false;
+    if (installMenuBtn) installMenuBtn.disabled = false;
   });
 
   // ─── Registro do Service Worker ───────────────────────────
@@ -1214,18 +2059,113 @@
 
   document.addEventListener('DOMContentLoaded', function () {
     applyTheme();
+    applyDesktopViewPreference();
+    ensureGoogleSheetsControls();
     renderAll();
+    setFilter(currentFilter);
+
+    var toggleMobileFiltersBtn = document.getElementById('toggleMobileFilters');
+    if (toggleMobileFiltersBtn) {
+      toggleMobileFiltersBtn.addEventListener('click', toggleMobileFilters);
+      setMobileFiltersCollapsed(true);
+    }
+
+    loadClientsFromGoogleSheets({ silent: true });
+
+    // No celular o menu começa fechado para não cobrir a lista.
+    var initialSidebar = document.getElementById('sidebar');
+    if (initialSidebar && !isDesktopViewForced() && window.matchMedia && window.matchMedia('(max-width: 768px)').matches) {
+      initialSidebar.classList.add('collapsed');
+    }
 
     // ── Sidebar toggle
     document.getElementById('toggleSidebar').addEventListener('click', function () {
       document.getElementById('sidebar').classList.toggle('collapsed');
     });
 
+    // Evita fechar/aplicar filtro quando o usuário apenas arrasta/rola o menu no celular.
+    var sidebar = document.getElementById('sidebar');
+    var sidebarPointerStartX = 0;
+    var sidebarPointerStartY = 0;
+    var sidebarPointerDragged = false;
+    var sidebarIgnoreClickUntil = 0;
+
+    function isMobileSidebarMode() {
+      return !isDesktopViewForced() && !!(window.matchMedia && window.matchMedia('(max-width: 768px)').matches);
+    }
+
+    function isSidebarScrollClick() {
+      // No computador o clique deve ser imediato. A proteção contra clique acidental
+      // vale só no mobile, quando o usuário arrasta/rola o menu com o dedo.
+      if (!isMobileSidebarMode()) return false;
+      return Date.now() < sidebarIgnoreClickUntil || sidebarPointerDragged;
+    }
+
+    if (sidebar) {
+      sidebar.addEventListener('pointerdown', function (event) {
+        if (!isMobileSidebarMode()) return;
+        sidebarPointerStartX = event.clientX || 0;
+        sidebarPointerStartY = event.clientY || 0;
+        sidebarPointerDragged = false;
+      }, { passive: true });
+
+      sidebar.addEventListener('pointermove', function (event) {
+        if (!isMobileSidebarMode()) return;
+        var dx = Math.abs((event.clientX || 0) - sidebarPointerStartX);
+        var dy = Math.abs((event.clientY || 0) - sidebarPointerStartY);
+        if (dx > 8 || dy > 8) {
+          sidebarPointerDragged = true;
+          sidebarIgnoreClickUntil = Date.now() + 450;
+        }
+      }, { passive: true });
+
+      sidebar.addEventListener('scroll', function () {
+        if (!isMobileSidebarMode()) return;
+        sidebarPointerDragged = true;
+        sidebarIgnoreClickUntil = Date.now() + 450;
+      }, { passive: true });
+
+      // Se um arrasto gerar um "click" ao soltar o dedo, cancela antes dos botões receberem.
+      // No desktop isso fica desligado para os filtros responderem com 1 clique.
+      sidebar.addEventListener('click', function (event) {
+        if (isSidebarScrollClick()) {
+          event.preventDefault();
+          event.stopPropagation();
+          sidebarPointerDragged = false;
+        }
+      }, true);
+    }
+
     // ── Filtros da sidebar
     document.querySelectorAll('.sidebar-btn').forEach(function (btn) {
       btn.addEventListener('click', function () {
+        if (isSidebarScrollClick()) return;
         setFilter(btn.dataset.filter);
+        closeSidebarOnMobile();
       });
+    });
+
+    // Fecha o menu no celular somente depois de um toque real em botão/link.
+    if (sidebar) {
+      sidebar.addEventListener('click', function (event) {
+        if (isSidebarScrollClick()) return;
+        var chosen = event.target.closest('button, a');
+        if (!chosen || chosen.id === 'toggleSidebar') return;
+        if (chosen.closest('#sidebar')) {
+          setTimeout(closeSidebarOnMobile, 80);
+        }
+      });
+    }
+
+    window.addEventListener('resize', function () {
+      applyDesktopViewPreference();
+      var s = document.getElementById('sidebar');
+      if (s && !isDesktopViewForced() && window.matchMedia && window.matchMedia('(max-width: 768px)').matches) {
+        s.classList.add('collapsed');
+      }
+      if (!isDesktopViewForced() && isMobileFilterLayout()) {
+        setMobileFiltersCollapsed(true);
+      }
     });
 
     // ── Busca
@@ -1280,6 +2220,8 @@
       document.getElementById('clientModalTitle').textContent = 'Adicionar Cliente';
       document.getElementById('clientForm').reset();
       document.getElementById('clientId').value = '';
+      // Novo cliente já abre com a data de vencimento preenchida com hoje.
+      document.getElementById('clientVencimento').value = todayISO();
       openModal('clientModal');
     });
     var emptyAdd = document.getElementById('emptyAddBtn');
@@ -1332,6 +2274,15 @@
       closeModal('verDepoisModal');
     });
 
+    // ── Atalhos Ver Depois: +1d, +3d, +7d, +15d, +30d
+    document.querySelectorAll('[data-ver-depois-days]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var days = parseInt(btn.dataset.verDepoisDays, 10);
+        if (isNaN(days)) return;
+        applyVerDepoisQuick(days);
+      });
+    });
+
     // ── Confirmar Produto em lote
     document.getElementById('confirmBatchProdutoBtn').addEventListener('click', function () {
       var produto = document.getElementById('batchProdutoInput').value.trim();
@@ -1354,8 +2305,7 @@
       closeModal('batchRenewModal');
     });
     document.getElementById('batchRenewNextMonth').addEventListener('click', function () {
-      var d = new Date(); d.setDate(d.getDate() + 30);
-      doBatchRenew(d.toISOString().slice(0, 10), document.getElementById('batchRenewDebit').checked);
+      doBatchRenewNextMonth(document.getElementById('batchRenewDebit').checked);
       closeModal('batchRenewModal');
     });
     document.getElementById('confirmBatchRenewBtn').addEventListener('click', function () {
@@ -1400,15 +2350,30 @@
     document.getElementById('sendNextOverdue').addEventListener('click', sendNextOverdue);
 
     // ── Instalar PWA
-    document.getElementById('installBtn').addEventListener('click', function () {
-      if (!deferredPrompt) return;
+    function handleInstallClick() {
+      if (!deferredPrompt) {
+        showToast('Se o botão de instalação não abrir, use o menu do navegador e escolha "Instalar app" ou "Adicionar à tela inicial".', 'info');
+        return;
+      }
+
       deferredPrompt.prompt();
       deferredPrompt.userChoice.then(function (result) {
         if (result.outcome === 'accepted') showToast('App instalado!', 'success');
         deferredPrompt = null;
-        document.getElementById('installBtn').hidden = true;
+        var installBtn = document.getElementById('installBtn');
+        var installMenuBtn = document.getElementById('installMenuBtn');
+        if (installBtn) installBtn.hidden = true;
+        if (installMenuBtn) installMenuBtn.disabled = false;
       });
-    });
+    }
+
+    var headerInstallBtn = document.getElementById('installBtn');
+    var menuInstallBtn = document.getElementById('installMenuBtn');
+    if (headerInstallBtn) headerInstallBtn.addEventListener('click', handleInstallClick);
+    if (menuInstallBtn) menuInstallBtn.addEventListener('click', handleInstallClick);
+
+    var desktopViewBtn = document.getElementById('desktopViewBtn');
+    if (desktopViewBtn) desktopViewBtn.addEventListener('click', toggleDesktopView);
 
     // ── Importar JSON
     document.getElementById('importBtn').addEventListener('click', function () {
@@ -1422,6 +2387,20 @@
     // ── Exportar tudo
     document.getElementById('exportAllBtn').addEventListener('click', exportAll);
 
+    // ── Google Sheets
+    var syncSheetsBtn = document.getElementById('syncSheetsBtn');
+    if (syncSheetsBtn) {
+      syncSheetsBtn.addEventListener('click', function () {
+        loadClientsFromGoogleSheets({ silent: false });
+      });
+    }
+    var pushSheetsBtn = document.getElementById('pushSheetsBtn');
+    if (pushSheetsBtn) {
+      pushSheetsBtn.addEventListener('click', function () {
+        syncClientsToGoogleSheets(loadClients(), { force: true, showToast: true });
+      });
+    }
+
     // ── Configurações
     document.getElementById('settingsBtn').addEventListener('click', function () {
       applyTheme(); // carrega valores atuais nos inputs
@@ -1429,23 +2408,44 @@
     });
     document.getElementById('saveSettingsBtn').addEventListener('click', saveSettings);
 
+    var actionOrderSettings = document.getElementById('actionOrderSettings');
+    if (actionOrderSettings) {
+      actionOrderSettings.addEventListener('click', function (event) {
+        var btn = event.target.closest('[data-move-action]');
+        if (!btn) return;
+        moveActionOrderItem(btn);
+      });
+    }
+
+    var resetActionOrderBtn = document.getElementById('resetActionOrderBtn');
+    if (resetActionOrderBtn) {
+      resetActionOrderBtn.addEventListener('click', function () {
+        renderActionOrderSettings(defaultActionOrder());
+        showToast('Ordem padrão dos botões restaurada. Clique em Salvar para aplicar.', 'info');
+      });
+    }
+
     // ── Avisos de conectividade
     window.addEventListener('online', function () {
-      showToast('Conexão restabelecida. O app continua salvando localmente.', 'success');
+      showToast('Conexão restabelecida. Sincronizando com Google Sheets...', 'success');
+      queueGoogleSheetsSave(loadClients());
     });
     window.addEventListener('offline', function () {
+      setSheetsStatus('Sheets: offline', 'warning');
       showToast('Você está offline. Os dados continuam funcionando neste aparelho.', 'warning');
     });
 
     // ── Limpar todos os dados
     document.getElementById('clearAllData').addEventListener('click', function () {
-      if (confirm('ATENÇÃO: Isso apagará TODOS os clientes e configurações. Deseja continuar?')) {
-        localStorage.removeItem(KEYS.clients);
+      if (confirm('ATENÇÃO: Isso apagará TODOS os clientes locais e também enviará a lista vazia ao Google Sheets. Deseja continuar?')) {
+        localStorage.setItem(KEYS.clients, JSON.stringify([]));
         localStorage.removeItem(KEYS.config);
         localStorage.removeItem(KEYS.undoStack);
         localStorage.removeItem(KEYS.redoStack);
+        sheetsLastSavedSignature = '';
         selectedIds.clear();
         renderAll();
+        syncClientsToGoogleSheets([], { force: true, showToast: true });
         closeModal('settingsModal');
         showToast('Todos os dados foram apagados', 'warning');
       }
